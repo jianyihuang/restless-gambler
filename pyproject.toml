@@ -1,0 +1,35 @@
+[project]
+name = "restless-gambler"
+version = "0.1.0"
+description = "Paper-first gambling market research, risk, and execution skeleton."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=46.0.0",
+    "duckdb>=1.5.3",
+    "streamlit>=1.58.0",
+]
+
+[project.scripts]
+restless-gambler = "restless_gambler.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

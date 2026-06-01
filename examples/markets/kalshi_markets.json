@@ -1,0 +1,181 @@
+{
+  "source": "fixture_cross_gambling_snapshot",
+  "generated_at": "2026-05-31T16:00:00Z",
+  "markets": [
+    {
+      "market_id": "KXFED-26JUN-CUT",
+      "event_id": "KXFED-26JUN",
+      "venue": "kalshi",
+      "product_type": "prediction_contract",
+      "title": "Will the Fed cut rates at the June 2026 meeting?",
+      "category": "economics",
+      "status": "open",
+      "close_time": "2026-06-17T18:00:00Z",
+      "liquidity": 125000,
+      "volume": 84000,
+      "rules_summary": "YES settles if the target range is lowered at the scheduled meeting.",
+      "outcomes": [
+        {
+          "outcome_id": "yes",
+          "name": "Yes",
+          "price": 0.41,
+          "price_format": "probability",
+          "bid": 0.37,
+          "ask": 0.41,
+          "metadata": {
+            "baseline_adjustment": 0.09
+          }
+        },
+        {
+          "outcome_id": "no",
+          "name": "No",
+          "price": 0.63,
+          "price_format": "probability",
+          "bid": 0.58,
+          "ask": 0.63,
+          "metadata": {
+            "baseline_adjustment": -0.09
+          }
+        }
+      ]
+    },
+    {
+      "market_id": "KXCPI-26JUN-GT32",
+      "event_id": "KXCPI-26JUN",
+      "venue": "kalshi",
+      "product_type": "prediction_contract",
+      "title": "Will year-over-year CPI be above 3.2% for June 2026?",
+      "category": "inflation",
+      "status": "open",
+      "close_time": "2026-07-15T12:30:00Z",
+      "liquidity": 76000,
+      "volume": 31000,
+      "rules_summary": "YES settles from the official CPI release.",
+      "outcomes": [
+        {
+          "outcome_id": "yes",
+          "name": "Yes",
+          "price": 0.47,
+          "price_format": "probability",
+          "bid": 0.44,
+          "ask": 0.47,
+          "metadata": {
+            "baseline_adjustment": 0.04
+          }
+        },
+        {
+          "outcome_id": "no",
+          "name": "No",
+          "price": 0.56,
+          "price_format": "probability",
+          "bid": 0.52,
+          "ask": 0.56,
+          "metadata": {
+            "baseline_adjustment": -0.04
+          }
+        }
+      ]
+    },
+    {
+      "market_id": "NBA-LAL-BOS-20260601-ML",
+      "event_id": "NBA-LAL-BOS-20260601",
+      "venue": "paper_sportsbook",
+      "product_type": "sportsbook",
+      "title": "Los Angeles Lakers at Boston Celtics moneyline",
+      "category": "basketball",
+      "status": "open",
+      "close_time": "2026-06-01T23:30:00Z",
+      "liquidity": 50000,
+      "volume": 22000,
+      "rules_summary": "Paper sportsbook fixture. Bet settles from final game result.",
+      "outcomes": [
+        {
+          "outcome_id": "lal",
+          "name": "Los Angeles Lakers",
+          "price": 125,
+          "price_format": "american",
+          "metadata": {
+            "baseline_adjustment": 0.08
+          }
+        },
+        {
+          "outcome_id": "bos",
+          "name": "Boston Celtics",
+          "price": -145,
+          "price_format": "american",
+          "metadata": {
+            "baseline_adjustment": -0.04
+          }
+        }
+      ]
+    },
+    {
+      "market_id": "KXNYC-26JUN-HIGH90",
+      "event_id": "KXNYC-26JUN",
+      "venue": "kalshi",
+      "product_type": "prediction_contract",
+      "title": "Will New York City reach at least 90F on June 20, 2026?",
+      "category": "weather",
+      "status": "open",
+      "close_time": "2026-06-20T23:59:00Z",
+      "liquidity": 18000,
+      "volume": 9200,
+      "rules_summary": "YES settles from the official observed high temperature station.",
+      "outcomes": [
+        {
+          "outcome_id": "yes",
+          "name": "Yes",
+          "price": 0.28,
+          "price_format": "probability",
+          "bid": 0.24,
+          "ask": 0.28,
+          "metadata": {
+            "baseline_adjustment": -0.05
+          }
+        },
+        {
+          "outcome_id": "no",
+          "name": "No",
+          "price": 0.76,
+          "price_format": "probability",
+          "bid": 0.71,
+          "ask": 0.76,
+          "metadata": {
+            "baseline_adjustment": 0.05
+          }
+        }
+      ]
+    },
+    {
+      "market_id": "KXOLD-26MAY-CLOSED",
+      "event_id": "KXOLD-26MAY",
+      "venue": "kalshi",
+      "product_type": "prediction_contract",
+      "title": "Closed fixture market ignored by the runner",
+      "category": "test",
+      "status": "closed",
+      "close_time": "2026-05-20T23:59:00Z",
+      "liquidity": 999999,
+      "volume": 1,
+      "rules_summary": "Closed market fixture.",
+      "outcomes": [
+        {
+          "outcome_id": "yes",
+          "name": "Yes",
+          "price": 0.51,
+          "price_format": "probability",
+          "bid": 0.5,
+          "ask": 0.51
+        },
+        {
+          "outcome_id": "no",
+          "name": "No",
+          "price": 0.5,
+          "price_format": "probability",
+          "bid": 0.49,
+          "ask": 0.5
+        }
+      ]
+    }
+  ]
+}
