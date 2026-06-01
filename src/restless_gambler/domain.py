@@ -157,6 +157,9 @@ class ExecutionRecord:
     filled_units: int = 0
     average_fill_price: float | None = None
     rejection_reason: str | None = None
+    external_order_id: str | None = None
+    venue_order_status: str | None = None
+    venue_order_json: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

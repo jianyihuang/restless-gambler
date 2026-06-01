@@ -235,6 +235,9 @@ def _execution_from_kalshi_order(
         filled_units=filled_units,
         average_fill_price=_fill_price(intent, order),
         rejection_reason=None if status != "rejected" else raw_status,
+        external_order_id=_kalshi_order_id(order),
+        venue_order_status=raw_status or None,
+        venue_order_json=order,
     )
 
 
@@ -286,6 +289,11 @@ def _fill_fee(order: dict[str, Any]) -> float:
         _optional_float(order.get(key)) or 0.0
         for key in ("taker_fees_dollars", "maker_fees_dollars")
     )
+
+
+def _kalshi_order_id(order: dict[str, Any]) -> str | None:
+    value = order.get("order_id") or order.get("id")
+    return str(value) if value else None
 
 
 def _fp_float(value: object) -> float:

@@ -54,6 +54,9 @@ The sports odds adapter:
 
 - Calls The Odds API read-only odds endpoint.
 - Calls The Odds API read-only scores endpoint for sportsbook paper settlement.
+- For `baseball_mlb`, attempts to enrich normalized markets with public MLB
+  Stats API standings so the research layer has a source-backed team-record
+  signal beyond sportsbook consensus.
 - Normalizes bookmaker odds into one `sportsbook` market per event/bookmaker
   market.
 - Stores bookmaker market/outcome metadata so the research layer can compare
@@ -62,11 +65,16 @@ The sports odds adapter:
 - Supports moneyline (`h2h`), spreads, totals, and any compatible provider
   market payload.
 
-When multiple sportsbook venues quote the same event/outcome set, the research
-layer computes a no-vig consensus probability and emits
-`sportsbook_consensus_no_vig` probability-adjustment signals. Those signals can
-move fair probability in paper runs; they are still research signals, not live
-sportsbook execution.
+When at least three non-extreme sportsbook venues quote the same event/outcome
+set, the research layer computes a robust no-vig consensus probability and emits
+`sportsbook_consensus_no_vig` probability-adjustment signals. Extreme American
+odds outliers are ignored. Those signals can move fair probability in paper
+runs; they are still research signals, not live sportsbook execution.
+
+For MLB markets enriched with Stats API data, the research layer may also emit
+`mlb_team_record_strength`, `mlb_probable_pitcher_strength`, and
+`mlb_bullpen_rest_proxy`. These are intentionally small and should be treated
+as independent starter signals, not a complete baseball model.
 
 Run paper simulations on real bookmaker venue names with an explicit venue
 allowlist:

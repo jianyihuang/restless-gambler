@@ -8,6 +8,10 @@ rediscovering the workflow.
 Restless Gambler is a paper-first gambling research bot. It supports:
 
 - Kalshi read-only market fetches and gated live Kalshi order placement.
+- Read-only Kalshi live planning via `live plan-kalshi`; it prints guarded
+  would-be order payloads and does not submit orders.
+- Persisted Kalshi live reconciliation via `live reconcile-kalshi` and guarded
+  resting-order cancellation via `live cancel-kalshi-order`.
 - The Odds API sportsbook odds fetches.
 - Merged market snapshots across Kalshi and sportsbooks.
 - Structured research signals, including sportsbook no-vig consensus.
@@ -16,6 +20,13 @@ Restless Gambler is a paper-first gambling research bot. It supports:
   Odds API scores.
 - `restless-gambler cycle` for the focused MLB paper workflow.
 - Latest/closing line tracking for open paper bets via merged snapshots.
+- Stale-market guards: market loading rejects open markets whose `close_time`
+  is already at or before snapshot `generated_at`, and line sync skips stale
+  quotes instead of recording them as latest lines.
+- Conservative sportsbook consensus: no-vig consensus requires at least three
+  non-extreme books and ignores extreme American odds outliers.
+- MLB paper signals can be enriched from MLB Stats API standings during
+  `baseball_mlb` odds fetches when that public source is available.
 
 The project intentionally stays separate from `~/marketforge`; run the namespace
 doctor before large integration changes.
@@ -28,9 +39,18 @@ uv run restless-gambler doctor namespace
 
 - Do not print or commit `.env`; real keys live there.
 - `.env`, `data/`, and generated run reports are ignored by git.
+- GitHub Issues are now the implementation queue. For broad requests like
+  "implement next" or "what should we do next", inspect open issues in
+  `jianyihuang/restless-gambler` before using the static notes below.
 - Default mode is paper.
 - Live Kalshi orders require both `RG_LIVE_TRADING_ENABLED=true` and
   `run --mode live --confirm-live`.
+- Live Kalshi runs also preflight account state and snapshot freshness before
+  order placement: cash reserve, existing resting orders, and snapshot age.
+- Live Kalshi submits at most one approved order by default (`--max-orders 1`).
+- Live Kalshi reconciliation persists read-only order and position snapshots in
+  DuckDB; guarded order cancellation is dry-run unless `--confirm-cancel` is
+  passed.
 - `--allow-snapshot-venues` is paper/research only and is rejected in live mode.
 - Sportsbook execution is paper/manual only. Do not add live sportsbook execution
   without an official legal account API and explicit user approval.
@@ -46,6 +66,41 @@ uv run restless-gambler doctor namespace
 
 The user has configured API keys in `.env`, including `THE_ODDS_API_KEY` and
 Kalshi credentials. Validate credentials with read-only commands only.
+The user explicitly asked to turn live betting on; local `.env` now has
+`RG_LIVE_TRADING_ENABLED=true`. This still is not sufficient to place orders:
+live Kalshi placement also requires an explicit `run --mode live --confirm-live`
+command. Do not add or run live sportsbook execution.
+
+Use the read-only planner before any live run:
+
+```bash
+uv run restless-gambler live plan-kalshi \
+  --base-url https://external-api.kalshi.com/trade-api/v2 \
+  --max-order-cost 1 \
+  --max-contracts 1 \
+  --max-orders 1
+```
+
+Planner defaults are intentionally tight: one planned order, `$1` max order
+cost, `$10` minimum cash reserve, no resting orders, and a market snapshot no
+older than `120` seconds.
+
+Persist a read-only live reconciliation snapshot:
+
+```bash
+uv run restless-gambler live reconcile-kalshi \
+  --base-url https://external-api.kalshi.com/trade-api/v2
+```
+
+Inspect a safe resting-order cancel dry-run before any mutation:
+
+```bash
+uv run restless-gambler live cancel-kalshi-order \
+  --base-url https://external-api.kalshi.com/trade-api/v2 \
+  --order-id <kalshi-order-id>
+```
+
+Only add `--confirm-cancel` after reviewing the dry-run output.
 
 ## Normal End-to-End Paper Workflow
 
@@ -163,13 +218,31 @@ uv run ruff check .
 uv run pytest
 ```
 
-Current expected baseline after the cycle/line-tracking work is `35 passed`.
+Current expected baseline after the live-reconciliation guardrail work is
+`52 passed`.
 
 ## Next Useful Work
 
-1. Add source-backed MLB stat signals beyond no-vig consensus.
-2. Add closing-line history charts and richer calibration views.
-3. Add historical backtest fixtures once enough settled paper bets exist.
-4. Add stricter live Kalshi reconciliation tables and cancellation/amend flows.
-5. Keep all new platform integrations behind product-specific adapters and risk
-   gates so they do not conflict with `~/marketforge`.
+Open GitHub Issues are the source of truth for implementation priority. Roadmap
+issues track product direction:
+
+- #6: Roadmap: Live Kalshi safety and operations.
+- #7: Roadmap: Paper trading, backtesting, and calibration.
+- #8: Roadmap: Sports data adapters and source-backed signals.
+- #9: Roadmap: Dashboard and decision review UI.
+- #10: Roadmap: Persistence, audit trail, and reconciliation.
+- #11: Roadmap: Risk management and bankroll controls.
+- #12: Roadmap: Platform boundaries and legal execution policy.
+
+Current shippable implementation issues:
+
+- #4: Persist live Kalshi reconciliation and add guarded cancel/amend workflow.
+- #1: Add settled-result fixtures and paper backtests.
+- #2: Add closing-line history charts and richer calibration views.
+- #3: Add MLB park, weather, and handedness source-backed signals.
+- #5: Codify GitHub issue workflow and platform-integration boundaries.
+
+When an issue is completed, close it and create follow-up issues only for
+concrete out-of-scope work discovered during implementation. Keep all new
+platform integrations behind product-specific adapters and risk gates so they do
+not conflict with `~/marketforge`.

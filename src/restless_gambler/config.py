@@ -57,6 +57,7 @@ class ExecutionConfig:
     reduce_only: bool = False
     live_trading_enabled: bool = False
     live_order_placement_confirmed: bool = False
+    max_live_orders: int = 1
     kalshi_base_url: str = KALSHI_DEMO_BASE_URL
 
 
@@ -101,6 +102,7 @@ def load_config(
     min_liquidity: float | None = None,
     max_wager_cost: float | None = None,
     max_units_per_wager: int | None = None,
+    max_live_orders: int | None = None,
     allowed_venues: tuple[str, ...] | None = None,
     confirm_live: bool = False,
 ) -> RestlessGamblerConfig:
@@ -148,6 +150,9 @@ def load_config(
         execution=ExecutionConfig(
             live_trading_enabled=live_trading_enabled,
             live_order_placement_confirmed=confirm_live,
+            max_live_orders=max_live_orders
+            if max_live_orders is not None
+            else ExecutionConfig.max_live_orders,
             kalshi_base_url=kalshi_base_url,
         ),
         data=DataConfig(markets_path=data_path),

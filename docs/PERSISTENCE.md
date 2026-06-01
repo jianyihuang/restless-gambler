@@ -103,6 +103,10 @@ uv run restless-gambler ledger sync-lines \
   --markets-path data/markets/merged_latest.json
 ```
 
+Line sync skips stale quotes whose market `close_time` is already at or before
+the snapshot `generated_at` timestamp. The sync summary reports those as
+`stale` instead of storing them as latest lines.
+
 ## Tables
 
 The importer writes run-scoped tables for:
@@ -127,12 +131,23 @@ settled paper bets.
 evaluation command compares entry implied probability to the latest observed
 implied probability; positive deltas mean the line moved toward the paper bet.
 
+Live Kalshi reconciliation and cancel audit data is stored separately from the
+paper ledger:
+
+- `kalshi_reconciliations` stores each read-only reconciliation run.
+- `kalshi_reconciliation_orders` stores raw and normalized order state.
+- `kalshi_reconciliation_positions` stores raw and normalized position state.
+- `kalshi_cancel_requests` stores dry-run and confirmed cancel attempts.
+
+Live execution imports also keep Kalshi order ids, venue statuses, and the raw
+order JSON in `executions` when the order-placement response provides them.
+
 ## Current Limits
 
 - Sports settlement sync currently handles The Odds API moneyline, spreads, and
   totals when point metadata is present.
-- Kalshi sync is read-only and only uses market status/result. It does not query
-  live account positions.
+- Kalshi paper settlement sync is read-only and only uses market status/result.
+  Live account orders and positions are captured through `live reconcile-kalshi`.
 - Calibration metrics stay sparse until enough paper bets settle.
 - Closing-line metrics are only as current as the latest merged snapshot passed
   to `ledger sync-lines` or produced by `cycle`.

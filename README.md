@@ -27,8 +27,11 @@ centralized risk checks, JSON artifacts, and tests around safety behavior.
   exceeds limits, or the venue/market is not allowed.
 - Research notes now include structured signals such as fixture-only probability
   adjustments, sportsbook consensus no-vig probabilities, bid/ask spread
-  quality, sportsbook overround, and activity level. Only explicit
+  quality, sportsbook overround, MLB standings-based team strength, probable
+  pitcher strength, bullpen-rest proxy, and activity level. Only explicit
   probability-adjustment signals move fair probability.
+- Snapshot loading filters stale markets whose close time has already passed by
+  the source snapshot timestamp; latest-line sync also skips stale quotes.
 - Kalshi live trading is implemented behind explicit safety gates. Sportsbook
   live placement remains paper/manual until a legal venue API is integrated.
 
@@ -189,9 +192,37 @@ uv run restless-gambler live preflight-kalshi \
   --base-url https://external-api.kalshi.com/trade-api/v2
 ```
 
-Market-data fetching and preflight are read-only. Kalshi live order placement is
-implemented behind two gates: `RG_LIVE_TRADING_ENABLED=true` and
-`run --mode live --confirm-live`. See `docs/LIVE_TRADING.md` before using it.
+Build a read-only live plan that prints would-be order payloads without placing
+anything:
+
+```bash
+uv run restless-gambler live plan-kalshi \
+  --base-url https://external-api.kalshi.com/trade-api/v2 \
+  --max-order-cost 1 \
+  --max-contracts 1 \
+  --max-orders 1
+```
+
+Market-data fetching, preflight, and live planning are read-only. Kalshi live
+order placement is implemented behind `RG_LIVE_TRADING_ENABLED=true`,
+`run --mode live --confirm-live`, and live preflight guardrails for cash reserve,
+resting orders, snapshot age, and max live order count. See
+`docs/LIVE_TRADING.md` before using it.
+
+Reconcile live Kalshi order/position state into DuckDB:
+
+```bash
+uv run restless-gambler live reconcile-kalshi \
+  --base-url https://external-api.kalshi.com/trade-api/v2
+```
+
+Dry-run cancellation of a resting Kalshi order:
+
+```bash
+uv run restless-gambler live cancel-kalshi-order \
+  --base-url https://external-api.kalshi.com/trade-api/v2 \
+  --order-id <kalshi-order-id>
+```
 
 Fetch sportsbook odds when `THE_ODDS_API_KEY` is configured:
 
@@ -216,6 +247,8 @@ uv run restless-gambler data merge-snapshots \
 
 - Default mode is paper.
 - Live Kalshi mode requires `RG_LIVE_TRADING_ENABLED=true` and `--confirm-live`.
+- Live Kalshi runs preflight account state and snapshot freshness before orders.
+- Live Kalshi submits at most one approved order by default.
 - `RG_KILL_SWITCH=true` rejects all wager intents.
 - `RG_LIVE_TRADING_ENABLED=false` by default.
 - The research/model layer never places wagers directly.

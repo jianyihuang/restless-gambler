@@ -6,7 +6,8 @@ from datetime import date
 import pytest
 
 from restless_gambler.config import load_config
-from restless_gambler.runner import RestlessGamblerRunner
+from restless_gambler.domain import RiskDecision
+from restless_gambler.runner import RestlessGamblerRunner, limit_live_order_decisions
 
 
 def test_paper_runner_writes_reproducible_artifact(tmp_path):
@@ -126,3 +127,26 @@ def test_live_mode_requires_confirm_live_flag(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="--confirm-live"):
         RestlessGamblerRunner(config).run()
+
+
+def test_live_order_limit_rejects_approvals_after_cap():
+    decisions = [
+        RiskDecision(
+            client_order_id="order-1",
+            status="approved",
+            reason="all risk checks passed",
+            checks=["risk"],
+        ),
+        RiskDecision(
+            client_order_id="order-2",
+            status="approved",
+            reason="all risk checks passed",
+            checks=["risk"],
+        ),
+    ]
+
+    limited = limit_live_order_decisions(decisions, max_orders=1)
+
+    assert [decision.status for decision in limited] == ["approved", "rejected"]
+    assert limited[1].reason == "max live orders per run reached"
+    assert "max_live_orders" in limited[1].checks

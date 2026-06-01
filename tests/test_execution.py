@@ -62,6 +62,8 @@ def test_kalshi_live_adapter_maps_resting_order_without_paper_fill(monkeypatch):
     assert captured_payloads
     assert executions[0].status == "new"
     assert executions[0].filled_units == 0
+    assert executions[0].external_order_id == "order-1"
+    assert executions[0].venue_order_status == "resting"
     assert bets == []
 
 
@@ -100,6 +102,8 @@ def test_kalshi_live_adapter_records_filled_order(monkeypatch):
 
     assert executions[0].status == "filled"
     assert executions[0].filled_units == 3
+    assert executions[0].external_order_id == "order-1"
+    assert executions[0].venue_order_json["status"] == "executed"
     assert bets[0].units == 3
     assert bets[0].cost == 1.31
 
