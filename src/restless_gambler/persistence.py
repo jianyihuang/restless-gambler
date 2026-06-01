@@ -761,6 +761,214 @@ def calibration_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
     }
 
 
+def settled_backtest_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
+    init_database(db_path)
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        overall = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.units, l.cost, l.payout,
+                       l.realized_pnl, l.expected_value, f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT COUNT(*) AS settled_count,
+                   COUNT(actual) AS graded_count,
+                   SUM(CASE WHEN settlement_status = 'won' THEN 1 ELSE 0 END)
+                     AS won_count,
+                   SUM(CASE WHEN settlement_status = 'lost' THEN 1 ELSE 0 END)
+                     AS lost_count,
+                   SUM(CASE WHEN settlement_status = 'push' THEN 1 ELSE 0 END)
+                     AS push_count,
+                   AVG(actual) AS hit_rate,
+                   COALESCE(SUM(cost), 0) AS total_cost,
+                   COALESCE(SUM(payout), 0) AS total_payout,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl,
+                   AVG(expected_value) AS average_expected_value,
+                   COALESCE(SUM(expected_value * units), 0)
+                     AS expected_value_units,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score
+            FROM settled
+            """
+        ).fetchone()
+        ev_bucket_rows = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.units, l.cost, l.payout,
+                       l.realized_pnl, l.expected_value, f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT CASE
+                     WHEN expected_value < 0.03 THEN '<3%'
+                     WHEN expected_value < 0.05 THEN '3-5%'
+                     WHEN expected_value < 0.10 THEN '5-10%'
+                     WHEN expected_value < 0.25 THEN '10-25%'
+                     ELSE '25%+'
+                   END AS expected_value_bucket,
+                   COUNT(*) AS settled_count,
+                   COUNT(actual) AS graded_count,
+                   AVG(expected_value) AS average_expected_value,
+                   AVG(actual) AS hit_rate,
+                   COALESCE(SUM(cost), 0) AS total_cost,
+                   COALESCE(SUM(payout), 0) AS total_payout,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score
+            FROM settled
+            GROUP BY expected_value_bucket
+            ORDER BY MIN(expected_value)
+            """
+        ).fetchall()
+        calibration_rows = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.realized_pnl, f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost')
+                  AND f.fair_probability IS NOT NULL
+            )
+            SELECT CASE
+                     WHEN fair_probability < 0.40 THEN '<40%'
+                     WHEN fair_probability < 0.50 THEN '40-50%'
+                     WHEN fair_probability < 0.60 THEN '50-60%'
+                     WHEN fair_probability < 0.70 THEN '60-70%'
+                     ELSE '70%+'
+                   END AS probability_bucket,
+                   COUNT(*) AS graded_count,
+                   AVG(fair_probability) AS average_fair_probability,
+                   AVG(actual) AS hit_rate,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+            FROM settled
+            GROUP BY probability_bucket
+            ORDER BY MIN(fair_probability)
+            """
+        ).fetchall()
+        closing_line = con.execute(
+            """
+            WITH latest_lines AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY client_order_id
+                         ORDER BY checked_at DESC
+                       ) AS rn
+                FROM paper_line_snapshots
+                WHERE source_generated_at = ''
+                   OR close_time = ''
+                   OR close_time > source_generated_at
+            ),
+            settled AS (
+                SELECT client_order_id
+                FROM paper_bet_ledger
+                WHERE settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT COUNT(*) AS tracked_count,
+                   AVG(implied_probability_delta) AS average_delta,
+                   SUM(CASE WHEN implied_probability_delta > 0 THEN 1 ELSE 0 END)
+                     AS positive_count,
+                   SUM(CASE WHEN implied_probability_delta < 0 THEN 1 ELSE 0 END)
+                     AS negative_count,
+                   SUM(CASE WHEN implied_probability_delta = 0 THEN 1 ELSE 0 END)
+                     AS unchanged_count
+            FROM latest_lines lines
+            JOIN settled
+              ON settled.client_order_id = lines.client_order_id
+            WHERE rn = 1
+            """
+        ).fetchone()
+
+    total_cost = float(overall[6] or 0.0)
+    warnings = []
+    if int(overall[0] or 0) == 0:
+        warnings.append("no settled paper bets found")
+    if int(closing_line[0] or 0) == 0:
+        warnings.append("no closing-line snapshots found for settled paper bets")
+
+    return {
+        "db_path": str(db_path),
+        "generated_at": _now(),
+        "overall": {
+            "settled_count": int(overall[0] or 0),
+            "graded_count": int(overall[1] or 0),
+            "won_count": int(overall[2] or 0),
+            "lost_count": int(overall[3] or 0),
+            "push_count": int(overall[4] or 0),
+            "hit_rate": _round_optional(overall[5], 4),
+            "total_cost": round(total_cost, 2),
+            "total_payout": round(float(overall[7] or 0.0), 2),
+            "realized_pnl": round(float(overall[8] or 0.0), 2),
+            "roi": _rate(overall[8], total_cost),
+            "average_expected_value": _round_optional(overall[9], 4),
+            "expected_value_units": round(float(overall[10] or 0.0), 4),
+            "brier_score": _round_optional(overall[11], 4),
+        },
+        "by_expected_value_bucket": [
+            {
+                "expected_value_bucket": row[0],
+                "settled_count": row[1],
+                "graded_count": row[2],
+                "average_expected_value": round(row[3] or 0.0, 4),
+                "hit_rate": _round_optional(row[4], 4),
+                "total_cost": round(row[5] or 0.0, 2),
+                "total_payout": round(row[6] or 0.0, 2),
+                "realized_pnl": round(row[7] or 0.0, 2),
+                "roi": _rate(row[7], row[5]),
+                "brier_score": _round_optional(row[8], 4),
+            }
+            for row in ev_bucket_rows
+        ],
+        "calibration_by_probability_bucket": [
+            {
+                "probability_bucket": row[0],
+                "graded_count": row[1],
+                "average_fair_probability": _round_optional(row[2], 4),
+                "hit_rate": _round_optional(row[3], 4),
+                "brier_score": _round_optional(row[4], 4),
+                "realized_pnl": round(row[5] or 0.0, 2),
+            }
+            for row in calibration_rows
+        ],
+        "closing_line_value": {
+            "tracked_count": int(closing_line[0] or 0),
+            "average_implied_probability_delta": _round_optional(
+                closing_line[1],
+                6,
+            ),
+            "positive_count": int(closing_line[2] or 0),
+            "negative_count": int(closing_line[3] or 0),
+            "unchanged_count": int(closing_line[4] or 0),
+        },
+        "warnings": warnings,
+    }
+
+
 def sync_paper_bet_lines(
     *,
     markets_path: Path,
@@ -1937,6 +2145,12 @@ def _round_optional(value: object, digits: int) -> float | None:
     if value is None:
         return None
     return round(float(value), digits)
+
+
+def _rate(numerator: object, denominator: object) -> float | None:
+    if denominator is None or float(denominator) == 0.0:
+        return None
+    return round(float(numerator or 0.0) / float(denominator), 4)
 
 
 def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:

@@ -16,6 +16,7 @@ Restless Gambler is a paper-first gambling research bot. It supports:
 - Merged market snapshots across Kalshi and sportsbooks.
 - Structured research signals, including sportsbook no-vig consensus.
 - Paper execution, DuckDB persistence, paper ledger, dashboard, and settlement.
+- Settled paper backtest reporting via `eval backtest`.
 - Read-only sportsbook moneyline, spread, and totals settlement sync from The
   Odds API scores.
 - `restless-gambler cycle` for the focused MLB paper workflow.
@@ -169,6 +170,7 @@ uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
 uv run restless-gambler eval closing-lines
+uv run restless-gambler eval backtest
 ```
 
 Launch dashboard:
@@ -211,6 +213,12 @@ uv run restless-gambler ledger sync-lines \
   --markets-path data/markets/merged_latest.json
 ```
 
+Settled paper backtest:
+
+```bash
+uv run restless-gambler eval backtest
+```
+
 ## Validation Before Pushing
 
 ```bash
@@ -218,8 +226,7 @@ uv run ruff check .
 uv run pytest
 ```
 
-Current expected baseline after the live-reconciliation guardrail work is
-`52 passed`.
+Current expected baseline after the settled-backtest work is `55 passed`.
 
 ## Next Useful Work
 
@@ -236,11 +243,13 @@ issues track product direction:
 
 Current shippable implementation issues:
 
-- #4: Persist live Kalshi reconciliation and add guarded cancel/amend workflow.
 - #1: Add settled-result fixtures and paper backtests.
 - #2: Add closing-line history charts and richer calibration views.
 - #3: Add MLB park, weather, and handedness source-backed signals.
 - #5: Codify GitHub issue workflow and platform-integration boundaries.
+- #14: Add paper backtest fixture bundles and strategy comparison reports.
+- #15: Gate live readiness on settled paper backtest thresholds.
+- #16: Expose settled backtest summaries in the dashboard.
 
 When an issue is completed, close it and create follow-up issues only for
 concrete out-of-scope work discovered during implementation. Keep all new
