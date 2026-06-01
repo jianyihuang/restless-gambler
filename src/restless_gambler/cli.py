@@ -52,6 +52,7 @@ from restless_gambler.persistence import (
     persist_kalshi_cancel_request,
     persist_kalshi_reconciliation,
     settle_paper_bet,
+    settled_backtest_summary,
     summarize_database,
     sync_paper_bet_lines,
 )
@@ -125,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
         return eval_calibration_command(args)
     if args.command == "eval" and args.eval_command == "closing-lines":
         return eval_closing_lines_command(args)
+    if args.command == "eval" and args.eval_command == "backtest":
+        return eval_backtest_command(args)
     if args.command == "doctor" and args.doctor_command == "namespace":
         return doctor_namespace_command(args)
     if args.command == "credentials" and args.credentials_command == "check-kalshi":
@@ -706,6 +709,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="summarize latest/closing line movement for tracked paper bets",
     )
     eval_lines_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
+    eval_backtest_parser = eval_subparsers.add_parser(
+        "backtest",
+        help="summarize settled paper-bet backtest performance",
+    )
+    eval_backtest_parser.add_argument(
         "--db-path",
         type=Path,
         default=DEFAULT_DB_PATH,
@@ -1415,6 +1428,11 @@ def eval_calibration_command(args) -> int:
 
 def eval_closing_lines_command(args) -> int:
     print(json.dumps(closing_line_summary(args.db_path), indent=2, sort_keys=True))
+    return 0
+
+
+def eval_backtest_command(args) -> int:
+    print(json.dumps(settled_backtest_summary(args.db_path), indent=2, sort_keys=True))
     return 0
 
 

@@ -41,6 +41,7 @@ uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
 uv run restless-gambler eval closing-lines
+uv run restless-gambler eval backtest
 ```
 
 Launch the local dashboard:
@@ -107,6 +108,18 @@ Line sync skips stale quotes whose market `close_time` is already at or before
 the snapshot `generated_at` timestamp. The sync summary reports those as
 `stale` instead of storing them as latest lines.
 
+Run a repeatable settled-paper backtest report:
+
+```bash
+uv run restless-gambler eval backtest
+```
+
+This reads settled rows from `paper_bet_ledger` and joins forecasts and latest
+line snapshots when available. It reports hit rate, realized PnL, ROI, EV bucket
+performance, probability-bucket calibration, and closing-line value. Empty
+states are explicit in the `warnings` array, so a no-data report is not confused
+with a profitable or unprofitable sample.
+
 ## Tables
 
 The importer writes run-scoped tables for:
@@ -130,6 +143,9 @@ settled paper bets.
 `paper_line_snapshots` stores latest quote snapshots for open paper bets. The
 evaluation command compares entry implied probability to the latest observed
 implied probability; positive deltas mean the line moved toward the paper bet.
+
+`eval backtest` combines `paper_bet_ledger`, `forecasts`, and latest usable
+`paper_line_snapshots` into a deterministic settled-performance report.
 
 Live Kalshi reconciliation and cancel audit data is stored separately from the
 paper ledger:

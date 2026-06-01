@@ -118,6 +118,7 @@ uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
 uv run restless-gambler eval closing-lines
+uv run restless-gambler eval backtest
 ```
 
 Launch the local dashboard:
@@ -177,6 +178,16 @@ file:
 uv run restless-gambler ledger sync-lines \
   --markets-path data/markets/merged_latest.json
 ```
+
+Run the settled paper backtest report after paper bets have been settled:
+
+```bash
+uv run restless-gambler eval backtest
+```
+
+The report reads DuckDB only. It summarizes settled hit rate, realized PnL, ROI,
+EV bucket performance, probability-bucket calibration, and latest closing-line
+movement when line snapshots exist.
 
 Check production Kalshi credentials without changing `.env`:
 
