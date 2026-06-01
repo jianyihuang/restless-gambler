@@ -59,7 +59,37 @@ class LineSyncSummary:
     checked_at: str
     matched: int
     missing: int
+    stale: int
     snapshots: list[dict[str, object]]
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class KalshiReconciliationSummary:
+    db_path: str
+    reconciliation_id: str
+    checked_at: str
+    base_url: str
+    order_count: int
+    position_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class KalshiCancelRequestSummary:
+    db_path: str
+    cancel_request_id: str
+    requested_at: str
+    base_url: str
+    order_id: str
+    dry_run: bool
+    confirmed: bool
+    result_status: str
+    error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -97,6 +127,7 @@ def import_run_artifact(
         _insert_executions(con, run_id, payload)
         _insert_bets(con, run_id, payload)
         _insert_positions(con, run_id, payload)
+        _prune_removed_open_ledger_bets(con, run_id, payload)
         _insert_ledger_bets(con, run_id, payload)
 
     return ImportSummary(
@@ -136,6 +167,10 @@ def summarize_database(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
                 "bets",
                 "paper_bet_ledger",
                 "paper_line_snapshots",
+                "kalshi_reconciliations",
+                "kalshi_reconciliation_orders",
+                "kalshi_reconciliation_positions",
+                "kalshi_cancel_requests",
             )
         }
         latest_runs = [
@@ -162,6 +197,183 @@ def summarize_database(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
         "table_counts": table_counts,
         "latest_runs": latest_runs,
     }
+
+
+def persist_kalshi_reconciliation(
+    *,
+    orders: list[dict[str, Any]],
+    positions: list[dict[str, Any]],
+    base_url: str,
+    db_path: Path = DEFAULT_DB_PATH,
+    checked_at: str | None = None,
+    reconciliation_id: str | None = None,
+) -> KalshiReconciliationSummary:
+    checked = checked_at or _now()
+    resolved_id = reconciliation_id or f"kalshi-reconcile-{_safe_id_time(checked)}"
+    persisted_at = _now()
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(db_path)) as con:
+        _create_schema(con)
+        con.execute(
+            "DELETE FROM kalshi_reconciliation_orders WHERE reconciliation_id = ?",
+            [resolved_id],
+        )
+        con.execute(
+            "DELETE FROM kalshi_reconciliation_positions WHERE reconciliation_id = ?",
+            [resolved_id],
+        )
+        con.execute(
+            "DELETE FROM kalshi_reconciliations WHERE reconciliation_id = ?",
+            [resolved_id],
+        )
+        con.execute(
+            """
+            INSERT INTO kalshi_reconciliations VALUES (
+                ?, ?, ?, ?, ?, ?
+            )
+            """,
+            [
+                resolved_id,
+                checked,
+                base_url,
+                len(orders),
+                len(positions),
+                persisted_at,
+            ],
+        )
+        for order in orders:
+            con.execute(
+                """
+                INSERT INTO kalshi_reconciliation_orders VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    resolved_id,
+                    _kalshi_order_id(order),
+                    _optional_string(order.get("client_order_id")),
+                    _optional_string(order.get("ticker") or order.get("market_ticker")),
+                    _optional_string(order.get("status")),
+                    _optional_string(order.get("action")),
+                    _optional_string(order.get("side")),
+                    _optional_float(
+                        order.get("count_fp")
+                        or order.get("count")
+                        or order.get("quantity")
+                    ),
+                    _optional_float(order.get("remaining_count_fp")),
+                    _optional_float(
+                        order.get("fill_count_fp") or order.get("filled_count")
+                    ),
+                    _kalshi_order_price(order),
+                    _optional_string(order.get("created_time")),
+                    _optional_string(order.get("last_update_time")),
+                    _json(order),
+                ],
+            )
+        for position in positions:
+            con.execute(
+                """
+                INSERT INTO kalshi_reconciliation_positions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    resolved_id,
+                    _optional_string(
+                        position.get("ticker") or position.get("market_ticker")
+                    ),
+                    _optional_float(
+                        position.get("position")
+                        or position.get("yes_count")
+                        or position.get("count")
+                    ),
+                    _optional_float(
+                        position.get("total_traded")
+                        or position.get("total_traded_count")
+                    ),
+                    _optional_float(position.get("resting_order_count")),
+                    _optional_string(position.get("market_exposure")),
+                    _optional_string(position.get("fees_paid")),
+                    _json(position),
+                ],
+            )
+
+    return KalshiReconciliationSummary(
+        db_path=str(db_path),
+        reconciliation_id=resolved_id,
+        checked_at=checked,
+        base_url=base_url,
+        order_count=len(orders),
+        position_count=len(positions),
+    )
+
+
+def persist_kalshi_cancel_request(
+    *,
+    base_url: str,
+    order_id: str,
+    dry_run: bool,
+    confirmed: bool,
+    order_before: dict[str, Any] | None,
+    response: dict[str, Any] | None,
+    result_status: str,
+    error: str | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+    requested_at: str | None = None,
+    cancel_request_id: str | None = None,
+) -> KalshiCancelRequestSummary:
+    requested = requested_at or _now()
+    resolved_id = cancel_request_id or f"kalshi-cancel-{_safe_id_time(requested)}"
+    response_order = response.get("order") if isinstance(response, dict) else None
+    response_order = response_order if isinstance(response_order, dict) else {}
+    order_before = order_before or {}
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(db_path)) as con:
+        _create_schema(con)
+        con.execute(
+            "DELETE FROM kalshi_cancel_requests WHERE cancel_request_id = ?",
+            [resolved_id],
+        )
+        con.execute(
+            """
+            INSERT INTO kalshi_cancel_requests VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            [
+                resolved_id,
+                requested,
+                base_url,
+                order_id,
+                _optional_string(order_before.get("client_order_id")),
+                _optional_string(
+                    order_before.get("ticker") or order_before.get("market_ticker")
+                ),
+                _optional_string(order_before.get("status")),
+                dry_run,
+                confirmed,
+                result_status,
+                _kalshi_order_id(response_order) if response_order else None,
+                _json(response or {}),
+                error,
+                _now(),
+            ],
+        )
+
+    return KalshiCancelRequestSummary(
+        db_path=str(db_path),
+        cancel_request_id=resolved_id,
+        requested_at=requested,
+        base_url=base_url,
+        order_id=order_id,
+        dry_run=dry_run,
+        confirmed=confirmed,
+        result_status=result_status,
+        error=error,
+    )
 
 
 def ledger_status(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
@@ -565,6 +777,7 @@ def sync_paper_bet_lines(
     open_bets = open_paper_bets(db_path=db_path, limit=limit)
     snapshots: list[dict[str, object]] = []
     missing = 0
+    stale = 0
 
     init_database(db_path)
     with duckdb.connect(str(db_path)) as con:
@@ -578,6 +791,9 @@ def sync_paper_bet_lines(
             quote = quote_map.get(key)
             if quote is None:
                 missing += 1
+                continue
+            if _quote_is_stale(quote, source_generated_at):
+                stale += 1
                 continue
 
             entry_price = float(bet["price"])
@@ -648,6 +864,7 @@ def sync_paper_bet_lines(
         checked_at=checked,
         matched=len(snapshots),
         missing=missing,
+        stale=stale,
         snapshots=snapshots,
     )
 
@@ -657,13 +874,20 @@ def closing_line_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
     with duckdb.connect(str(db_path), read_only=True) as con:
         overall = con.execute(
             """
-            WITH latest AS (
+            WITH usable_snapshots AS (
+                SELECT *
+                FROM paper_line_snapshots
+                WHERE source_generated_at = ''
+                   OR close_time = ''
+                   OR close_time > source_generated_at
+            ),
+            latest AS (
                 SELECT *,
                        ROW_NUMBER() OVER (
                          PARTITION BY client_order_id
                          ORDER BY checked_at DESC
                        ) AS rn
-                FROM paper_line_snapshots
+                FROM usable_snapshots
             )
             SELECT COUNT(*) AS tracked_count,
                    AVG(implied_probability_delta) AS average_delta,
@@ -679,13 +903,20 @@ def closing_line_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
         ).fetchone()
         by_venue_rows = con.execute(
             """
-            WITH latest AS (
+            WITH usable_snapshots AS (
+                SELECT *
+                FROM paper_line_snapshots
+                WHERE source_generated_at = ''
+                   OR close_time = ''
+                   OR close_time > source_generated_at
+            ),
+            latest AS (
                 SELECT *,
                        ROW_NUMBER() OVER (
                          PARTITION BY client_order_id
                          ORDER BY checked_at DESC
                        ) AS rn
-                FROM paper_line_snapshots
+                FROM usable_snapshots
             )
             SELECT venue, product_type,
                    COUNT(*) AS tracked_count,
@@ -702,13 +933,20 @@ def closing_line_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
         ).fetchall()
         latest_rows = con.execute(
             """
-            WITH latest AS (
+            WITH usable_snapshots AS (
+                SELECT *
+                FROM paper_line_snapshots
+                WHERE source_generated_at = ''
+                   OR close_time = ''
+                   OR close_time > source_generated_at
+            ),
+            latest AS (
                 SELECT *,
                        ROW_NUMBER() OVER (
                          PARTITION BY client_order_id
                          ORDER BY checked_at DESC
                        ) AS rn
-                FROM paper_line_snapshots
+                FROM usable_snapshots
             )
             SELECT client_order_id, checked_at, venue, product_type, market_id,
                    outcome_id, outcome_name, entry_price, latest_price,
@@ -1016,10 +1254,16 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             submitted_at TEXT,
             filled_units INTEGER,
             average_fill_price DOUBLE,
-            rejection_reason TEXT
+            rejection_reason TEXT,
+            external_order_id TEXT,
+            venue_order_status TEXT,
+            venue_order_json TEXT
         )
         """
     )
+    _ensure_column(con, "executions", "external_order_id", "TEXT")
+    _ensure_column(con, "executions", "venue_order_status", "TEXT")
+    _ensure_column(con, "executions", "venue_order_json", "TEXT")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS bets (
@@ -1102,6 +1346,72 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             implied_probability_delta DOUBLE,
             market_status TEXT,
             close_time TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kalshi_reconciliations (
+            reconciliation_id TEXT PRIMARY KEY,
+            checked_at TEXT,
+            base_url TEXT,
+            order_count INTEGER,
+            position_count INTEGER,
+            persisted_at TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kalshi_reconciliation_orders (
+            reconciliation_id TEXT,
+            order_id TEXT,
+            client_order_id TEXT,
+            ticker TEXT,
+            status TEXT,
+            action TEXT,
+            side TEXT,
+            count DOUBLE,
+            remaining_count DOUBLE,
+            filled_count DOUBLE,
+            price DOUBLE,
+            created_time TEXT,
+            last_update_time TEXT,
+            raw_json TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kalshi_reconciliation_positions (
+            reconciliation_id TEXT,
+            ticker TEXT,
+            position DOUBLE,
+            total_traded DOUBLE,
+            resting_order_count DOUBLE,
+            market_exposure TEXT,
+            fees_paid TEXT,
+            raw_json TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kalshi_cancel_requests (
+            cancel_request_id TEXT PRIMARY KEY,
+            requested_at TEXT,
+            base_url TEXT,
+            order_id TEXT,
+            client_order_id TEXT,
+            ticker TEXT,
+            status_before TEXT,
+            dry_run BOOLEAN,
+            confirmed BOOLEAN,
+            result_status TEXT,
+            response_order_id TEXT,
+            response_json TEXT,
+            error TEXT,
+            persisted_at TEXT
         )
         """
     )
@@ -1390,7 +1700,7 @@ def _insert_executions(
         con.execute(
             """
             INSERT INTO executions VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -1410,6 +1720,9 @@ def _insert_executions(
                 execution.get("filled_units"),
                 execution.get("average_fill_price"),
                 execution.get("rejection_reason"),
+                execution.get("external_order_id"),
+                execution.get("venue_order_status"),
+                _json(execution.get("venue_order_json") or {}),
             ],
         )
 
@@ -1529,6 +1842,43 @@ def _insert_ledger_bets(
         )
 
 
+def _prune_removed_open_ledger_bets(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    payload: dict[str, Any],
+) -> None:
+    if payload.get("runtime_mode") != "paper":
+        return
+
+    current_bet_ids = {
+        str(bet.get("client_order_id"))
+        for bet in payload.get("bets", [])
+        if bet.get("client_order_id")
+    }
+    rows = con.execute(
+        """
+        SELECT client_order_id
+        FROM paper_bet_ledger
+        WHERE first_run_id = ?
+          AND settlement_status = 'open'
+        """,
+        [run_id],
+    ).fetchall()
+    removed_bet_ids = [
+        str(row[0]) for row in rows if str(row[0]) not in current_bet_ids
+    ]
+
+    for client_order_id in removed_bet_ids:
+        con.execute(
+            "DELETE FROM paper_line_snapshots WHERE client_order_id = ?",
+            [client_order_id],
+        )
+        con.execute(
+            "DELETE FROM paper_bet_ledger WHERE client_order_id = ?",
+            [client_order_id],
+        )
+
+
 def _settlement_payout(
     *,
     outcome: str,
@@ -1596,6 +1946,20 @@ def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
         return 0
 
 
+def _ensure_column(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    column: str,
+    column_type: str,
+) -> None:
+    columns = {
+        str(row[1])
+        for row in con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    }
+    if column not in columns:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True)
 
@@ -1608,6 +1972,47 @@ def _loads_json_object(value: object) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _safe_id_time(value: str) -> str:
+    return (
+        value.replace("+00:00", "Z")
+        .replace(":", "")
+        .replace("-", "")
+        .replace(".", "")
+    )
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kalshi_order_id(order: dict[str, Any]) -> str | None:
+    return _optional_string(order.get("order_id") or order.get("id"))
+
+
+def _kalshi_order_price(order: dict[str, Any]) -> float | None:
+    for key in (
+        "yes_price_dollars",
+        "no_price_dollars",
+        "price_dollars",
+        "price",
+    ):
+        value = _optional_float(order.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def _snapshot_quote_map(
@@ -1642,6 +2047,29 @@ def _snapshot_quote_map(
                 "close_time": str(market.get("close_time") or ""),
             }
     return quote_map, generated_at
+
+
+def _quote_is_stale(quote: dict[str, object], source_generated_at: str) -> bool:
+    generated_time = _parse_optional_datetime(source_generated_at)
+    close_time = _parse_optional_datetime(str(quote.get("close_time") or ""))
+    return (
+        generated_time is not None
+        and close_time is not None
+        and close_time <= generated_time
+    )
+
+
+def _parse_optional_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _latest_line_price(outcome: dict[str, object]) -> float | None:

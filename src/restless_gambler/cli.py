@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -12,10 +13,19 @@ from restless_gambler.config import (
     DEFAULT_ALLOWED_VENUES,
     DEFAULT_ARTIFACTS_DIR,
     DEFAULT_MARKETS_PATH,
+    KALSHI_DEMO_BASE_URL,
     load_config,
 )
+from restless_gambler.domain import RiskDecision
 from restless_gambler.env import load_dotenv
+from restless_gambler.execution import build_kalshi_order_payload
+from restless_gambler.forecast import (
+    build_opportunity_diagnostics,
+    find_opportunities,
+    generate_forecasts,
+)
 from restless_gambler.kalshi import (
+    cancel_kalshi_order,
     check_kalshi_credentials,
     fetch_kalshi_market_data,
     fetch_kalshi_orders,
@@ -23,7 +33,10 @@ from restless_gambler.kalshi import (
     kalshi_account_snapshot,
     write_kalshi_market_snapshot,
 )
-from restless_gambler.market_data import merge_market_snapshot_files
+from restless_gambler.market_data import (
+    load_market_snapshots,
+    merge_market_snapshot_files,
+)
 from restless_gambler.namespace import namespace_report
 from restless_gambler.paths import DATA_DIR
 from restless_gambler.persistence import (
@@ -36,13 +49,18 @@ from restless_gambler.persistence import (
     ledger_status,
     open_ledger_exposure,
     open_ledger_wager_keys,
+    persist_kalshi_cancel_request,
+    persist_kalshi_reconciliation,
     settle_paper_bet,
     summarize_database,
     sync_paper_bet_lines,
 )
+from restless_gambler.research import build_research_notes
+from restless_gambler.risk import evaluate_risk
 from restless_gambler.runner import (
     RestlessGamblerRunner,
     build_run_id,
+    build_wager_intents,
     run_id_for_config,
 )
 from restless_gambler.settlement import (
@@ -93,10 +111,14 @@ def main(argv: list[str] | None = None) -> int:
         return ledger_sync_sportsbook_command(args)
     if args.command == "ledger" and args.ledger_command == "sync-lines":
         return ledger_sync_lines_command(args)
+    if args.command == "live" and args.live_command == "plan-kalshi":
+        return live_plan_kalshi_command(args)
     if args.command == "live" and args.live_command == "preflight-kalshi":
         return live_preflight_kalshi_command(args)
     if args.command == "live" and args.live_command == "reconcile-kalshi":
         return live_reconcile_kalshi_command(args)
+    if args.command == "live" and args.live_command == "cancel-kalshi-order":
+        return live_cancel_kalshi_order_command(args)
     if args.command == "eval" and args.eval_command == "summary":
         return eval_summary_command(args)
     if args.command == "eval" and args.eval_command == "calibration":
@@ -169,6 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum contracts/stake units per wager intent",
     )
     run_parser.add_argument(
+        "--max-orders",
+        type=int,
+        default=1,
+        dest="max_live_orders",
+        help="live only: maximum approved live orders to submit",
+    )
+    run_parser.add_argument(
         "--persist",
         action="store_true",
         help="import the written run artifact into DuckDB after the run",
@@ -205,6 +234,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-live",
         action="store_true",
         help="required with --mode live before any live platform order is submitted",
+    )
+    run_parser.add_argument(
+        "--min-cash-reserve",
+        type=float,
+        default=10.0,
+        help="live only: minimum Kalshi cash balance in dollars required",
+    )
+    run_parser.add_argument(
+        "--max-snapshot-age-seconds",
+        type=int,
+        default=120,
+        help="live only: maximum age of the market snapshot before rejection",
+    )
+    run_parser.add_argument(
+        "--allow-resting-orders",
+        action="store_true",
+        help="live only: allow placement when existing Kalshi resting orders exist",
     )
 
     cycle_parser = subparsers.add_parser(
@@ -671,6 +717,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="read-only live account checks and reconciliation",
     )
     live_subparsers = live_parser.add_subparsers(dest="live_command")
+    live_plan_parser = live_subparsers.add_parser(
+        "plan-kalshi",
+        help="fetch Kalshi and print guarded would-be live orders without placing",
+    )
+    live_plan_parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Kalshi authenticated API base URL; defaults to KALSHI_BASE_URL or demo",
+    )
+    live_plan_parser.add_argument(
+        "--market-data-base-url",
+        default=None,
+        help="Kalshi market-data API base URL; defaults to production market data",
+    )
+    live_plan_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="maximum open Kalshi markets to fetch",
+    )
+    live_plan_parser.add_argument(
+        "--skip-orderbooks",
+        action="store_true",
+        help="skip per-market orderbook requests",
+    )
+    live_plan_parser.add_argument(
+        "--orderbook-depth",
+        type=int,
+        default=1,
+        help="Kalshi orderbook depth to fetch for each market",
+    )
+    live_plan_parser.add_argument(
+        "--snapshot-output",
+        type=Path,
+        default=DATA_DIR / "markets" / "kalshi_live_plan_latest.json",
+        help="path where the fetched Kalshi planning snapshot is written",
+    )
+    live_plan_parser.add_argument(
+        "--min-expected-value",
+        type=float,
+        default=None,
+        help="minimum expected value after estimated fees",
+    )
+    live_plan_parser.add_argument(
+        "--min-liquidity",
+        type=float,
+        default=100.0,
+        help="minimum normalized liquidity/activity required for a market",
+    )
+    live_plan_parser.add_argument(
+        "--max-order-cost",
+        type=float,
+        default=1.0,
+        dest="max_wager_cost",
+        help="maximum estimated cost for one planned live order",
+    )
+    live_plan_parser.add_argument(
+        "--max-orders",
+        type=int,
+        default=1,
+        help="maximum approved live orders to include in the plan",
+    )
+    live_plan_parser.add_argument(
+        "--max-contracts",
+        "--max-units",
+        type=int,
+        default=1,
+        dest="max_units_per_wager",
+        help="maximum contracts per planned live order",
+    )
+    live_plan_parser.add_argument(
+        "--min-cash-reserve",
+        type=float,
+        default=10.0,
+        help="minimum Kalshi cash balance in dollars required before planning",
+    )
+    live_plan_parser.add_argument(
+        "--max-snapshot-age-seconds",
+        type=int,
+        default=120,
+        help="maximum age of fetched market snapshot before planning rejects it",
+    )
+    live_plan_parser.add_argument(
+        "--allow-resting-orders",
+        action="store_true",
+        help="allow planning even when existing Kalshi resting orders are present",
+    )
     live_preflight_parser = live_subparsers.add_parser(
         "preflight-kalshi",
         help="verify Kalshi credentials, balance, positions, and resting orders",
@@ -694,6 +827,57 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help="maximum orders/positions to fetch",
+    )
+    live_reconcile_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
+    live_reconcile_parser.add_argument(
+        "--no-persist",
+        action="store_false",
+        dest="persist",
+        default=True,
+        help="print reconciliation without writing the DuckDB audit tables",
+    )
+    live_cancel_parser = live_subparsers.add_parser(
+        "cancel-kalshi-order",
+        help="dry-run or explicitly confirm cancellation of one resting Kalshi order",
+    )
+    live_cancel_parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Kalshi API base URL; defaults to KALSHI_BASE_URL or demo",
+    )
+    live_cancel_parser.add_argument(
+        "--order-id",
+        required=True,
+        help="Kalshi order id to cancel",
+    )
+    live_cancel_parser.add_argument(
+        "--confirm-cancel",
+        action="store_true",
+        help="required before the Kalshi cancel endpoint is called",
+    )
+    live_cancel_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="maximum resting orders to inspect before cancellation",
+    )
+    live_cancel_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
+    live_cancel_parser.add_argument(
+        "--no-persist",
+        action="store_false",
+        dest="persist",
+        default=True,
+        help="print cancel result without writing the DuckDB audit tables",
     )
 
     doctor_parser = subparsers.add_parser(
@@ -758,9 +942,16 @@ def run_command(args) -> int:
         min_liquidity=args.min_liquidity,
         max_wager_cost=args.max_wager_cost,
         max_units_per_wager=args.max_units_per_wager,
+        max_live_orders=args.max_live_orders,
         allowed_venues=allowed_venues,
         confirm_live=args.confirm_live,
     )
+    if config.mode == "live":
+        live_readiness = _live_run_readiness(config=config, args=args)
+        if not live_readiness["ready"]:
+            print(json.dumps(live_readiness, indent=2, sort_keys=True))
+            return 1
+
     run_id = run_id_for_config(config)
     duplicate_guard_enabled = (
         args.persist or args.avoid_open_ledger
@@ -813,6 +1004,96 @@ def _snapshot_venues(path: Path) -> set[str]:
         for market in markets
         if isinstance(market, dict) and market.get("venue")
     }
+
+
+def _live_run_readiness(*, config, args) -> dict[str, object]:
+    gate_guardrails = [
+        {
+            "name": "live_trading_enabled",
+            "status": (
+                "passed"
+                if config.execution.live_trading_enabled
+                else "failed"
+            ),
+            "required": "RG_LIVE_TRADING_ENABLED=true",
+        },
+        {
+            "name": "confirm_live",
+            "status": (
+                "passed"
+                if config.execution.live_order_placement_confirmed
+                else "failed"
+            ),
+            "required": "run --mode live --confirm-live",
+        },
+    ]
+    failed_gate_guardrails = [
+        guardrail["name"]
+        for guardrail in gate_guardrails
+        if guardrail["status"] != "passed"
+    ]
+    payload: dict[str, object] = {
+        "ready": False,
+        "reason": "live gate failed"
+        if failed_gate_guardrails
+        else "live guardrail preflight failed",
+        "credential_check": None,
+        "account": None,
+        "guardrails": gate_guardrails,
+        "order_placement": "not attempted",
+    }
+    if failed_gate_guardrails:
+        return payload
+
+    credential_check = check_kalshi_credentials(
+        base_url=config.execution.kalshi_base_url
+    )
+    account = (
+        kalshi_account_snapshot(base_url=config.execution.kalshi_base_url)
+        if credential_check.ok
+        else None
+    )
+    payload["credential_check"] = credential_check.to_dict()
+    payload["account"] = account.to_dict() if account else None
+    if not credential_check.ok or (account is not None and not account.ok):
+        payload["reason"] = "account preflight failed"
+        return payload
+
+    try:
+        snapshot_generated_at = _snapshot_generated_at(config.data.markets_path)
+    except (OSError, ValueError) as error:
+        payload["reason"] = f"market snapshot preflight failed: {error}"
+        return payload
+
+    guardrails = [
+        *gate_guardrails,
+        *_live_kalshi_guardrails(
+            account=account,
+            snapshot_generated_at=snapshot_generated_at,
+            min_cash_reserve=args.min_cash_reserve,
+            max_snapshot_age_seconds=args.max_snapshot_age_seconds,
+            allow_resting_orders=args.allow_resting_orders,
+        ),
+    ]
+    payload["guardrails"] = guardrails
+    payload["ready"] = all(
+        guardrail["status"] == "passed" for guardrail in guardrails
+    )
+    payload["reason"] = (
+        "all live guardrails passed"
+        if payload["ready"]
+        else "live guardrail failed"
+    )
+    return payload
+
+
+def _snapshot_generated_at(path: Path) -> str:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    generated_at = payload.get("generated_at")
+    if not generated_at:
+        msg = f"market snapshot {path} does not contain generated_at"
+        raise ValueError(msg)
+    return str(generated_at)
 
 
 def cycle_command(args) -> int:
@@ -1137,6 +1418,294 @@ def eval_closing_lines_command(args) -> int:
     return 0
 
 
+def live_plan_kalshi_command(args) -> int:
+    credential_check = check_kalshi_credentials(base_url=args.base_url)
+    account = (
+        kalshi_account_snapshot(base_url=args.base_url)
+        if credential_check.ok
+        else None
+    )
+    payload: dict[str, object] = {
+        "credential_check": credential_check.to_dict(),
+        "account": account.to_dict() if account else None,
+        "readiness": {},
+        "live_gate": {},
+        "guardrails": [],
+        "market_snapshot": {},
+        "strategy": {},
+        "opportunity_diagnostics": [],
+        "risk_decisions": [],
+        "planned_orders": [],
+        "order_placement": "not attempted; plan-kalshi is read-only",
+    }
+    if not credential_check.ok or (account is not None and not account.ok):
+        payload["readiness"] = {"ready": False, "reason": "account preflight failed"}
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1
+
+    try:
+        fetch = fetch_kalshi_market_data(
+            base_url=args.market_data_base_url,
+            max_markets=args.limit,
+            include_orderbooks=not args.skip_orderbooks,
+            orderbook_depth=args.orderbook_depth,
+        )
+        snapshot_path = write_kalshi_market_snapshot(
+            output_path=args.snapshot_output,
+            fetch=fetch,
+        )
+        config = load_config(
+            mode="live",
+            markets_path=snapshot_path,
+            min_expected_value=args.min_expected_value,
+            min_liquidity=args.min_liquidity,
+            max_wager_cost=args.max_wager_cost,
+            max_units_per_wager=args.max_units_per_wager,
+            max_live_orders=args.max_orders,
+            allowed_venues=("kalshi",),
+            confirm_live=False,
+        )
+        loaded_markets = load_market_snapshots(
+            path=snapshot_path,
+            as_of=config.as_of,
+            min_liquidity=config.strategy.min_liquidity,
+            max_markets=config.strategy.max_markets,
+        )
+    except (OSError, ValueError) as error:
+        payload["readiness"] = {
+            "ready": False,
+            "reason": f"market planning failed: {error}",
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1
+
+    markets = [
+        market
+        for market in loaded_markets.markets
+        if market.venue == "kalshi" and market.product_type == "prediction_contract"
+    ]
+    research_notes = build_research_notes(markets)
+    forecasts = generate_forecasts(
+        markets=markets,
+        research_notes=research_notes,
+        model=config.model,
+    )
+    opportunity_diagnostics = build_opportunity_diagnostics(
+        markets=markets,
+        forecasts=forecasts,
+        min_expected_value=config.strategy.min_expected_value,
+    )
+    opportunities = find_opportunities(
+        markets=markets,
+        forecasts=forecasts,
+        min_expected_value=config.strategy.min_expected_value,
+        max_units=config.risk.max_units_per_wager,
+    )
+    intents = build_wager_intents(
+        run_id=f"live-plan-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
+        opportunities=opportunities,
+        post_only=config.execution.post_only,
+        reduce_only=config.execution.reduce_only,
+    )
+    risk_decisions = evaluate_risk(
+        intents=intents,
+        markets=markets,
+        risk=config.risk,
+    )
+    guardrails = _live_kalshi_guardrails(
+        account=account,
+        snapshot_generated_at=fetch.generated_at,
+        min_cash_reserve=args.min_cash_reserve,
+        max_snapshot_age_seconds=args.max_snapshot_age_seconds,
+        allow_resting_orders=args.allow_resting_orders,
+    )
+    guarded_decisions = _apply_live_kalshi_guardrails(
+        decisions=risk_decisions,
+        guardrails=guardrails,
+        max_orders=args.max_orders,
+    )
+    decisions_by_id = {
+        decision.client_order_id: decision for decision in guarded_decisions
+    }
+    planned_orders = [
+        {
+            "client_order_id": intent.client_order_id,
+            "intent": asdict(intent),
+            "payload": build_kalshi_order_payload(intent),
+        }
+        for intent in intents
+        if decisions_by_id[intent.client_order_id].status == "approved"
+    ]
+    payload.update(
+        {
+            "readiness": {
+                "ready": (
+                    config.execution.live_trading_enabled
+                    and bool(planned_orders)
+                    and all(
+                        guardrail["status"] == "passed"
+                        for guardrail in guardrails
+                    )
+                ),
+                "approved_live_intent_count": len(planned_orders),
+                "rejected_intent_count": sum(
+                    decision.status == "rejected" for decision in guarded_decisions
+                ),
+            },
+            "live_gate": {
+                "live_trading_enabled": config.execution.live_trading_enabled,
+                "live_order_placement_confirmed": False,
+                "required_for_placement": [
+                    "RG_LIVE_TRADING_ENABLED=true",
+                    "run --mode live --confirm-live",
+                ],
+            },
+            "guardrails": guardrails,
+            "market_snapshot": {
+                "path": str(snapshot_path),
+                "base_url": fetch.base_url,
+                "generated_at": fetch.generated_at,
+                "age_seconds": _snapshot_age_seconds(fetch.generated_at),
+                "raw_market_count": fetch.raw_market_count,
+                "loaded_market_count": len(markets),
+                "fetch_warnings": fetch.warnings,
+                "load_warnings": loaded_markets.warnings,
+            },
+            "strategy": {
+                "opportunity_count": len(opportunities),
+                "intent_count": len(intents),
+                "min_expected_value": config.strategy.min_expected_value,
+                "max_order_cost": config.risk.max_wager_cost,
+                "max_orders": args.max_orders,
+            },
+            "opportunity_diagnostics": [
+                asdict(diagnostic) for diagnostic in opportunity_diagnostics
+            ],
+            "risk_decisions": [
+                asdict(decision) for decision in guarded_decisions
+            ],
+            "planned_orders": planned_orders,
+        }
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _live_kalshi_guardrails(
+    *,
+    account,
+    snapshot_generated_at: str,
+    min_cash_reserve: float,
+    max_snapshot_age_seconds: int,
+    allow_resting_orders: bool,
+) -> list[dict[str, object]]:
+    balance = _kalshi_balance_dollars(account)
+    resting_order_count = len(account.resting_orders) if account else 0
+    snapshot_age = _snapshot_age_seconds(snapshot_generated_at)
+    return [
+        {
+            "name": "cash_reserve",
+            "status": "passed" if balance >= min_cash_reserve else "failed",
+            "balance_dollars": balance,
+            "min_cash_reserve": min_cash_reserve,
+        },
+        {
+            "name": "resting_orders",
+            "status": (
+                "passed"
+                if allow_resting_orders or resting_order_count == 0
+                else "failed"
+            ),
+            "resting_order_count": resting_order_count,
+            "allow_resting_orders": allow_resting_orders,
+        },
+        {
+            "name": "snapshot_age",
+            "status": (
+                "passed"
+                if snapshot_age is not None
+                and snapshot_age <= max_snapshot_age_seconds
+                else "failed"
+            ),
+            "age_seconds": snapshot_age,
+            "max_snapshot_age_seconds": max_snapshot_age_seconds,
+        },
+    ]
+
+
+def _apply_live_kalshi_guardrails(
+    *,
+    decisions: list[RiskDecision],
+    guardrails: list[dict[str, object]],
+    max_orders: int,
+) -> list[RiskDecision]:
+    failed_guardrails = [
+        str(guardrail["name"])
+        for guardrail in guardrails
+        if guardrail["status"] != "passed"
+    ]
+    guarded: list[RiskDecision] = []
+    approved_count = 0
+    for decision in decisions:
+        if decision.status == "rejected":
+            guarded.append(decision)
+            continue
+        if failed_guardrails:
+            guarded.append(
+                replace(
+                    decision,
+                    status="rejected",
+                    reason=(
+                        "live guardrail failed: " + ", ".join(failed_guardrails)
+                    ),
+                    checks=[*decision.checks, "live_guardrails"],
+                )
+            )
+            continue
+        if approved_count >= max_orders:
+            guarded.append(
+                replace(
+                    decision,
+                    status="rejected",
+                    reason="max live orders per run reached",
+                    checks=[*decision.checks, "max_live_orders"],
+                )
+            )
+            continue
+        approved_count += 1
+        guarded.append(decision)
+    return guarded
+
+
+def _kalshi_balance_dollars(account) -> float:
+    if account is None:
+        return 0.0
+    raw_balance = account.balance.get("balance_dollars")
+    if raw_balance is not None:
+        return float(raw_balance)
+    cents = account.balance.get("balance")
+    return float(cents or 0.0) / 100.0
+
+
+def _snapshot_age_seconds(generated_at: str) -> float | None:
+    generated_time = _parse_cli_datetime(generated_at)
+    if generated_time is None:
+        return None
+    return round((datetime.now(UTC) - generated_time).total_seconds(), 3)
+
+
+def _parse_cli_datetime(value: str):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def live_preflight_kalshi_command(args) -> int:
     credential_check = check_kalshi_credentials(base_url=args.base_url)
     account = (
@@ -1157,6 +1726,8 @@ def live_preflight_kalshi_command(args) -> int:
 
 
 def live_reconcile_kalshi_command(args) -> int:
+    checked_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    base_url = _kalshi_cli_base_url(args.base_url)
     try:
         orders = fetch_kalshi_orders(
             base_url=args.base_url,
@@ -1170,19 +1741,182 @@ def live_reconcile_kalshi_command(args) -> int:
         print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
         return 1
 
+    persisted = None
+    if args.persist:
+        persisted = persist_kalshi_reconciliation(
+            orders=orders,
+            positions=positions,
+            base_url=base_url,
+            db_path=args.db_path,
+            checked_at=checked_at,
+        )
     print(
         json.dumps(
             {
+                "checked_at": checked_at,
+                "base_url": base_url,
                 "orders": orders,
                 "positions": positions,
                 "order_count": len(orders),
                 "position_count": len(positions),
+                "persisted": persisted.to_dict() if persisted else None,
             },
             indent=2,
             sort_keys=True,
         )
     )
     return 0
+
+
+def live_cancel_kalshi_order_command(args) -> int:
+    requested_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    base_url = _kalshi_cli_base_url(args.base_url)
+    dry_run = not args.confirm_cancel
+    try:
+        resting_orders = fetch_kalshi_orders(
+            base_url=args.base_url,
+            status="resting",
+            limit=args.limit,
+        )
+    except (OSError, ValueError) as error:
+        print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
+        return 1
+
+    order = _find_kalshi_order(resting_orders, args.order_id)
+    if order is None:
+        result_status = "not_found"
+        persisted = (
+            persist_kalshi_cancel_request(
+                base_url=base_url,
+                order_id=args.order_id,
+                dry_run=dry_run,
+                confirmed=args.confirm_cancel,
+                order_before=None,
+                response=None,
+                result_status=result_status,
+                error="order was not found among resting Kalshi orders",
+                db_path=args.db_path,
+                requested_at=requested_at,
+            )
+            if args.persist
+            else None
+        )
+        print(
+            json.dumps(
+                {
+                    "requested_at": requested_at,
+                    "base_url": base_url,
+                    "order_id": args.order_id,
+                    "result_status": result_status,
+                    "error": "order was not found among resting Kalshi orders",
+                    "resting_order_count": len(resting_orders),
+                    "persisted": persisted.to_dict() if persisted else None,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    response = None
+    error = None
+    result_status = "dry_run"
+    if not dry_run:
+        try:
+            response = cancel_kalshi_order(
+                order_id=args.order_id,
+                base_url=args.base_url,
+            )
+            response_order = response.get("order")
+            if isinstance(response_order, dict):
+                result_status = str(
+                    response_order.get("status") or "cancel_submitted"
+                )
+            else:
+                result_status = "cancel_submitted"
+        except (OSError, ValueError) as cancel_error:
+            error = str(cancel_error)
+            result_status = "error"
+
+    persisted_cancel = (
+        persist_kalshi_cancel_request(
+            base_url=base_url,
+            order_id=args.order_id,
+            dry_run=dry_run,
+            confirmed=args.confirm_cancel,
+            order_before=order,
+            response=response,
+            result_status=result_status,
+            error=error,
+            db_path=args.db_path,
+            requested_at=requested_at,
+        )
+        if args.persist
+        else None
+    )
+    persisted_reconciliation = None
+    if response is not None and args.persist:
+        try:
+            orders = fetch_kalshi_orders(base_url=args.base_url, limit=args.limit)
+            positions = fetch_kalshi_positions(base_url=args.base_url, limit=args.limit)
+            persisted_reconciliation = persist_kalshi_reconciliation(
+                orders=orders,
+                positions=positions,
+                base_url=base_url,
+                db_path=args.db_path,
+                checked_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            )
+        except (OSError, ValueError) as reconcile_error:
+            error = f"{error}; reconciliation failed: {reconcile_error}" if error else (
+                f"reconciliation failed: {reconcile_error}"
+            )
+
+    print(
+        json.dumps(
+            {
+                "requested_at": requested_at,
+                "base_url": base_url,
+                "order_id": args.order_id,
+                "matched_order": order,
+                "dry_run": dry_run,
+                "confirmed": args.confirm_cancel,
+                "confirmation_required": (
+                    None if args.confirm_cancel else "--confirm-cancel"
+                ),
+                "result_status": result_status,
+                "cancel_response": response,
+                "error": error,
+                "persisted_cancel_request": (
+                    persisted_cancel.to_dict() if persisted_cancel else None
+                ),
+                "persisted_reconciliation": (
+                    persisted_reconciliation.to_dict()
+                    if persisted_reconciliation
+                    else None
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 1 if error else 0
+
+
+def _find_kalshi_order(
+    orders: list[dict[str, object]],
+    order_id: str,
+) -> dict[str, object] | None:
+    for order in orders:
+        current_order_id = order.get("order_id") or order.get("id")
+        if str(current_order_id) == order_id:
+            return order
+    return None
+
+
+def _kalshi_cli_base_url(base_url: str | None) -> str:
+    return (base_url or os.environ.get("KALSHI_BASE_URL", KALSHI_DEMO_BASE_URL)).rstrip(
+        "/"
+    )
 
 
 def doctor_namespace_command(args) -> int:

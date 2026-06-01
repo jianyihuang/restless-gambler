@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -234,6 +234,22 @@ def authenticated_post_json(
     )
 
 
+def authenticated_delete_json(
+    *,
+    endpoint: str,
+    base_url: str | None = None,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    return _authenticated_request_json(
+        method="DELETE",
+        endpoint=endpoint,
+        base_url=base_url,
+        query=None,
+        body=None,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def create_kalshi_order(
     *,
     payload: dict[str, object],
@@ -251,6 +267,28 @@ def create_kalshi_order(
         msg = "Kalshi create order response did not contain an order object"
         raise ValueError(msg)
     return order
+
+
+def cancel_kalshi_order(
+    *,
+    order_id: str,
+    base_url: str | None = None,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    clean_order_id = order_id.strip()
+    if not clean_order_id:
+        msg = "order_id is required"
+        raise ValueError(msg)
+
+    response = authenticated_delete_json(
+        endpoint=f"/portfolio/orders/{quote(clean_order_id, safe='')}",
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    if not isinstance(response.get("order"), dict):
+        msg = "Kalshi cancel order response did not contain an order object"
+        raise ValueError(msg)
+    return response
 
 
 def fetch_kalshi_orders(

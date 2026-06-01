@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from restless_gambler.domain import (
     Market,
     PortfolioSnapshot,
     Position,
+    RiskDecision,
     RunArtifact,
     WagerIntent,
 )
@@ -108,6 +110,11 @@ class RestlessGamblerRunner:
             existing_total_exposure=self.existing_total_exposure,
             existing_market_exposure=self.existing_market_exposure,
         )
+        if self.config.mode == "live":
+            risk_decisions = limit_live_order_decisions(
+                risk_decisions,
+                max_orders=self.config.execution.max_live_orders,
+            )
         executions, bets = self._execute(
             intents=wager_intents,
             risk_decisions=risk_decisions,
@@ -230,6 +237,32 @@ def build_wager_intents(
             )
         )
     return intents
+
+
+def limit_live_order_decisions(
+    decisions: Iterable[RiskDecision],
+    *,
+    max_orders: int,
+) -> list[RiskDecision]:
+    approved_count = 0
+    limited: list[RiskDecision] = []
+    for decision in decisions:
+        if decision.status == "rejected":
+            limited.append(decision)
+            continue
+        if approved_count >= max_orders:
+            limited.append(
+                replace(
+                    decision,
+                    status="rejected",
+                    reason="max live orders per run reached",
+                    checks=[*decision.checks, "max_live_orders"],
+                )
+            )
+            continue
+        approved_count += 1
+        limited.append(decision)
+    return limited
 
 
 def apply_bets(

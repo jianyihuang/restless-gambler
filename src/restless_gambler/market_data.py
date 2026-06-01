@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -15,14 +15,18 @@ class LoadedMarkets:
     path: Path
     source: str
     generated_at: str
+    warnings: list[str] = field(default_factory=list)
 
     def data_source(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "name": self.source,
             "path": str(self.path),
             "generated_at": self.generated_at,
             "market_count": len(self.markets),
         }
+        if self.warnings:
+            payload["warnings"] = self.warnings
+        return payload
 
 
 def load_market_snapshots(
@@ -38,21 +42,36 @@ def load_market_snapshots(
         msg = "market snapshot must contain a markets list"
         raise ValueError(msg)
 
+    generated_at = str(payload.get("generated_at", ""))
+    freshness_reference = _freshness_reference_time(
+        generated_at=generated_at,
+        as_of=as_of,
+    )
     markets = [_parse_market(raw_market) for raw_market in raw_markets]
-    open_markets = [
-        market
-        for market in markets
-        if market.status == "open"
-        and market.liquidity >= min_liquidity
-        and _parse_datetime(market.close_time).date() >= as_of
-    ]
+    open_markets: list[Market] = []
+    stale_market_count = 0
+    for market in markets:
+        close_time = _parse_datetime(market.close_time)
+        if market.status != "open" or market.liquidity < min_liquidity:
+            continue
+        if close_time.date() < as_of or close_time <= freshness_reference:
+            stale_market_count += 1
+            continue
+        open_markets.append(market)
+
     open_markets.sort(key=lambda market: (-market.liquidity, market.close_time))
+    warnings = []
+    if stale_market_count:
+        warnings.append(
+            f"filtered {stale_market_count} stale market(s) at or past close_time"
+        )
 
     return LoadedMarkets(
         markets=open_markets[:max_markets],
         path=path,
         source=str(payload.get("source", "unknown_market_snapshot")),
-        generated_at=str(payload.get("generated_at", "")),
+        generated_at=generated_at,
+        warnings=warnings,
     )
 
 
@@ -185,3 +204,19 @@ def _parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _freshness_reference_time(*, generated_at: str, as_of: date) -> datetime:
+    generated_time = _parse_optional_datetime(generated_at)
+    if generated_time is not None:
+        return generated_time
+    return datetime.combine(as_of, time.min, tzinfo=UTC)
+
+
+def _parse_optional_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _parse_datetime(value)
+    except ValueError:
+        return None

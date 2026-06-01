@@ -59,7 +59,11 @@ def test_sportsbook_consensus_signals_use_no_vig_cross_book_prices():
         model=ModelConfig(),
     )
 
-    assert set(signals_by_market) == {"book-a-event-1-h2h", "book-b-event-1-h2h"}
+    assert set(signals_by_market) == {
+        "book-a-event-1-h2h",
+        "book-b-event-1-h2h",
+        "book-c-event-1-h2h",
+    }
     assert any(
         signal.name == "sportsbook_consensus_no_vig"
         and signal.outcome_id == "lakers"
@@ -74,6 +78,30 @@ def test_sportsbook_consensus_signals_use_no_vig_cross_book_prices():
     )
     assert book_b_lakers.fair_probability > 0.41
     assert "sportsbook_consensus_no_vig" in book_b_lakers.rationale
+
+
+def test_sportsbook_consensus_requires_three_non_extreme_books():
+    markets = _sportsbook_markets()[:2] + [
+        Market(
+            market_id="book-outlier-event-1-h2h",
+            event_id="event-1",
+            venue="book_outlier",
+            product_type="sportsbook",
+            title="Lakers at Celtics h2h at Outlier Book",
+            category="basketball_nba",
+            status="open",
+            close_time="2026-06-01T23:30:00Z",
+            liquidity=0,
+            volume=0,
+            rules_summary="outlier",
+            outcomes=[
+                _sports_outcome("lakers", "Los Angeles Lakers", 10000),
+                _sports_outcome("celtics", "Boston Celtics", -20000),
+            ],
+        )
+    ]
+
+    assert build_sportsbook_consensus_signals(markets) == {}
 
 
 def _market() -> Market:
@@ -147,6 +175,23 @@ def _sportsbook_markets() -> list[Market]:
             outcomes=[
                 _sports_outcome("lakers", "Los Angeles Lakers", 150),
                 _sports_outcome("celtics", "Boston Celtics", -160),
+            ],
+        ),
+        Market(
+            market_id="book-c-event-1-h2h",
+            event_id="event-1",
+            venue="book_c",
+            product_type="sportsbook",
+            title="Lakers at Celtics h2h at Book C",
+            category="basketball_nba",
+            status="open",
+            close_time="2026-06-01T23:30:00Z",
+            liquidity=0,
+            volume=0,
+            rules_summary="book C",
+            outcomes=[
+                _sports_outcome("lakers", "Los Angeles Lakers", 130),
+                _sports_outcome("celtics", "Boston Celtics", -150),
             ],
         ),
     ]

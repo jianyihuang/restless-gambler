@@ -15,6 +15,8 @@ from restless_gambler.persistence import (
     open_ledger_exposure,
     open_ledger_wager_keys,
     open_paper_bets,
+    persist_kalshi_cancel_request,
+    persist_kalshi_reconciliation,
     settle_paper_bet,
     summarize_database,
     sync_paper_bet_lines,
@@ -104,6 +106,75 @@ def test_ledger_status_and_manual_settlement(tmp_path):
     assert calibration["by_expected_value_bucket"]
 
 
+def test_reimport_prunes_removed_open_ledger_bets(tmp_path):
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+        )
+    ).run()
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    db_path = tmp_path / "restless.duckdb"
+    import_run_artifact(artifact_path=artifact_path, db_path=db_path)
+    removed_bet_id = payload["bets"][0]["client_order_id"]
+
+    trimmed_payload = {
+        **payload,
+        "bets": payload["bets"][1:],
+        "wager_intents": payload["wager_intents"][1:],
+        "executions": payload["executions"][1:],
+        "positions": payload["positions"][1:],
+    }
+    trimmed_artifact_path = tmp_path / "trimmed-run.json"
+    trimmed_artifact_path.write_text(json.dumps(trimmed_payload), encoding="utf-8")
+
+    import_run_artifact(artifact_path=trimmed_artifact_path, db_path=db_path)
+
+    assert removed_bet_id not in {
+        bet["client_order_id"] for bet in open_paper_bets(db_path=db_path)
+    }
+    assert summarize_database(db_path)["table_counts"]["paper_bet_ledger"] == len(
+        trimmed_payload["bets"]
+    )
+
+
+def test_reimport_preserves_removed_settled_ledger_bets(tmp_path):
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+        )
+    ).run()
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    db_path = tmp_path / "restless.duckdb"
+    import_run_artifact(artifact_path=artifact_path, db_path=db_path)
+    removed_bet_id = payload["bets"][0]["client_order_id"]
+    settle_paper_bet(
+        client_order_id=removed_bet_id,
+        outcome="lost",
+        db_path=db_path,
+    )
+
+    trimmed_payload = {
+        **payload,
+        "bets": payload["bets"][1:],
+        "wager_intents": payload["wager_intents"][1:],
+        "executions": payload["executions"][1:],
+        "positions": payload["positions"][1:],
+    }
+    trimmed_artifact_path = tmp_path / "trimmed-run.json"
+    trimmed_artifact_path.write_text(json.dumps(trimmed_payload), encoding="utf-8")
+
+    import_run_artifact(artifact_path=trimmed_artifact_path, db_path=db_path)
+    status = ledger_status(db_path)
+
+    assert any(row["settlement_status"] == "lost" for row in status["summary"])
+
+
 def test_sync_paper_bet_lines_tracks_latest_prices(tmp_path):
     artifact_path = RestlessGamblerRunner(
         load_config(
@@ -156,6 +227,48 @@ def test_sync_paper_bet_lines_tracks_latest_prices(tmp_path):
     assert summary["latest"][0]["client_order_id"]
 
 
+def test_sync_paper_bet_lines_skips_stale_snapshot_quotes(tmp_path):
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+        )
+    ).run()
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    db_path = tmp_path / "restless.duckdb"
+    import_run_artifact(artifact_path=artifact_path, db_path=db_path)
+
+    first_bet = payload["bets"][0]
+    snapshot = {
+        "source": "test_stale_lines",
+        "generated_at": "2026-06-02T00:00:00Z",
+        "markets": [
+            {
+                **market,
+                "close_time": "2026-06-01T00:00:00Z",
+            }
+            for market in payload["markets"]
+            if market["market_id"] == first_bet["market_id"]
+        ],
+    }
+    snapshot_path = tmp_path / "stale_lines.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    line_sync = sync_paper_bet_lines(
+        markets_path=snapshot_path,
+        db_path=db_path,
+        checked_at="2026-06-02T00:01:00Z",
+    )
+
+    assert line_sync.stale == 1
+    assert not any(
+        snapshot["client_order_id"] == first_bet["client_order_id"]
+        for snapshot in line_sync.snapshots
+    )
+
+
 def test_live_run_import_does_not_populate_paper_ledger(tmp_path):
     artifact_path = RestlessGamblerRunner(
         load_config(
@@ -176,3 +289,97 @@ def test_live_run_import_does_not_populate_paper_ledger(tmp_path):
 
     assert db_summary["table_counts"]["bets"] == len(payload["bets"])
     assert db_summary["table_counts"]["paper_bet_ledger"] == 0
+
+
+def test_import_run_artifact_persists_live_kalshi_order_metadata(tmp_path):
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+        )
+    ).run()
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["runtime_mode"] = "live"
+    payload["executions"][0]["external_order_id"] = "kalshi-order-1"
+    payload["executions"][0]["venue_order_status"] = "resting"
+    payload["executions"][0]["venue_order_json"] = {
+        "order_id": "kalshi-order-1",
+        "status": "resting",
+    }
+    live_artifact_path = tmp_path / "live-run-with-order.json"
+    live_artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+    db_path = tmp_path / "restless.duckdb"
+
+    import_run_artifact(artifact_path=live_artifact_path, db_path=db_path)
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        row = con.execute(
+            """
+            SELECT external_order_id, venue_order_status, venue_order_json
+            FROM executions
+            WHERE external_order_id = 'kalshi-order-1'
+            """
+        ).fetchone()
+
+    assert row[0] == "kalshi-order-1"
+    assert row[1] == "resting"
+    assert json.loads(row[2])["status"] == "resting"
+
+
+def test_persist_kalshi_reconciliation_and_cancel_audit(tmp_path):
+    db_path = tmp_path / "restless.duckdb"
+    order = {
+        "order_id": "order-1",
+        "client_order_id": "client-1",
+        "ticker": "KXTEST",
+        "status": "resting",
+        "action": "buy",
+        "side": "yes",
+        "count_fp": "3.00",
+        "remaining_count_fp": "3.00",
+        "fill_count_fp": "0.00",
+        "yes_price_dollars": "0.4200",
+        "created_time": "2026-05-31T00:00:00Z",
+    }
+
+    reconciliation = persist_kalshi_reconciliation(
+        orders=[order],
+        positions=[{"ticker": "KXTEST", "position": "1"}],
+        base_url="https://kalshi.example.test",
+        db_path=db_path,
+        checked_at="2026-05-31T00:00:00Z",
+    )
+    cancel = persist_kalshi_cancel_request(
+        base_url="https://kalshi.example.test",
+        order_id="order-1",
+        dry_run=True,
+        confirmed=False,
+        order_before=order,
+        response=None,
+        result_status="dry_run",
+        db_path=db_path,
+        requested_at="2026-05-31T00:00:01Z",
+    )
+    db_summary = summarize_database(db_path)
+
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        order_row = con.execute(
+            """
+            SELECT order_id, status, remaining_count, price
+            FROM kalshi_reconciliation_orders
+            """
+        ).fetchone()
+        cancel_row = con.execute(
+            """
+            SELECT order_id, dry_run, confirmed, result_status
+            FROM kalshi_cancel_requests
+            """
+        ).fetchone()
+
+    assert reconciliation.order_count == 1
+    assert cancel.result_status == "dry_run"
+    assert db_summary["table_counts"]["kalshi_reconciliations"] == 1
+    assert order_row == ("order-1", "resting", 3.0, 0.42)
+    assert cancel_row == ("order-1", True, False, "dry_run")

@@ -14,6 +14,12 @@ from urllib.parse import urlencode, urljoin
 from restless_gambler.domain import Market, OutcomeQuote
 from restless_gambler.env import load_dotenv
 from restless_gambler.kalshi import market_to_snapshot_dict
+from restless_gambler.mlb_stats import (
+    enrich_mlb_markets_with_team_records,
+    fetch_mlb_game_contexts,
+    fetch_mlb_team_records,
+    infer_mlb_season,
+)
 
 DEFAULT_ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
@@ -111,14 +117,30 @@ def fetch_sports_odds(
 
     warnings: list[str] = []
     normalized_markets: list[Market] = []
-    for event in payload:
-        if not isinstance(event, dict):
-            warnings.append("skipped non-object event")
-            continue
+    normalized_events = [event for event in payload if isinstance(event, dict)]
+    skipped_event_count = len(payload) - len(normalized_events)
+    if skipped_event_count:
+        warnings.append(f"skipped {skipped_event_count} non-object event(s)")
+    for event in normalized_events:
         try:
             normalized_markets.extend(normalize_sports_event(event))
         except (KeyError, ValueError) as error:
             warnings.append(f"event skipped {event.get('id')}: {error}")
+    if sport == "baseball_mlb" and normalized_markets:
+        try:
+            season = infer_mlb_season(normalized_events)
+            records = fetch_mlb_team_records(season=season)
+            contexts = fetch_mlb_game_contexts(
+                events=normalized_events,
+                season=season,
+            )
+            normalized_markets = enrich_mlb_markets_with_team_records(
+                normalized_markets,
+                records,
+                contexts,
+            )
+        except (OSError, ValueError) as error:
+            warnings.append(f"MLB enrichment skipped: {error}")
 
     return SportsOddsFetch(
         markets=normalized_markets,
@@ -206,7 +228,13 @@ def normalize_sports_event(event: dict[str, Any]) -> list[Market]:
         for book_market in _list_value(bookmaker.get("markets")):
             market_key = str(book_market.get("key") or "")
             outcomes = [
-                _normalize_outcome(outcome, market_key=market_key)
+                _normalize_outcome(
+                    outcome,
+                    market_key=market_key,
+                    home_team=home_team,
+                    away_team=away_team,
+                    commence_time=commence_time,
+                )
                 for outcome in _list_value(book_market.get("outcomes"))
             ]
             if not outcomes:
@@ -262,7 +290,14 @@ def write_sports_odds_snapshot(
     return output_path
 
 
-def _normalize_outcome(outcome: dict[str, Any], *, market_key: str) -> OutcomeQuote:
+def _normalize_outcome(
+    outcome: dict[str, Any],
+    *,
+    market_key: str,
+    home_team: str,
+    away_team: str,
+    commence_time: str,
+) -> OutcomeQuote:
     name = str(outcome["name"])
     point = outcome.get("point")
     price = float(outcome["price"])
@@ -277,6 +312,9 @@ def _normalize_outcome(outcome: dict[str, Any], *, market_key: str) -> OutcomeQu
             "raw_name": name,
             "point": point,
             "market_key": market_key,
+            "home_team": home_team,
+            "away_team": away_team,
+            "commence_time": commence_time,
         },
     )
 
