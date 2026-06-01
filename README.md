@@ -43,6 +43,14 @@ uv run restless-gambler run --mode paper --as-of 2026-05-31
 uv run pytest
 ```
 
+GitHub Actions runs the same default checks on pull requests and pushes to
+`main`:
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
 Without `uv`, use any Python 3.12 environment and install the project in editable
 mode.
 

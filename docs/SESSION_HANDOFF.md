@@ -226,6 +226,9 @@ uv run ruff check .
 uv run pytest
 ```
 
+GitHub Actions also runs these checks on pull requests and pushes to `main`
+with Python 3.12 and `uv sync --locked --group dev`.
+
 Current expected baseline after the settled-backtest work is `55 passed`.
 
 ## Next Useful Work
