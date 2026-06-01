@@ -12,7 +12,9 @@ Restless Gambler is a paper-first gambling research bot. It supports:
 - Merged market snapshots across Kalshi and sportsbooks.
 - Structured research signals, including sportsbook no-vig consensus.
 - Paper execution, DuckDB persistence, paper ledger, dashboard, and settlement.
-- Read-only sportsbook h2h settlement sync from The Odds API scores.
+- Read-only sportsbook moneyline, spread, and totals settlement sync from The
+  Odds API scores.
+- `restless-gambler cycle` for the focused MLB paper workflow.
 
 The project intentionally stays separate from `~/marketforge`; run the namespace
 doctor before large integration changes.
@@ -46,6 +48,21 @@ Kalshi credentials. Validate credentials with read-only commands only.
 
 ## Normal End-to-End Paper Workflow
 
+Prefer the single paper cycle command:
+
+```bash
+uv run restless-gambler cycle \
+  --sport baseball_mlb \
+  --max-contracts 1 \
+  --max-order-cost 1
+```
+
+The cycle command fetches Kalshi, fetches sportsbook odds, merges snapshots,
+runs persisted paper execution with snapshot venues allowed, syncs settlements,
+and prints a compact JSON state summary.
+
+Manual equivalent:
+
 Fetch Kalshi:
 
 ```bash
@@ -58,9 +75,9 @@ Fetch sportsbook odds:
 
 ```bash
 uv run restless-gambler data fetch-odds \
-  --sport upcoming \
+  --sport baseball_mlb \
   --regions us \
-  --markets h2h \
+  --markets h2h,spreads,totals \
   --output data/markets/sports_odds_latest.json
 ```
 
@@ -92,6 +109,7 @@ Inspect state:
 uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
+uv run restless-gambler eval calibration
 ```
 
 Launch dashboard:
@@ -119,11 +137,11 @@ uv run restless-gambler ledger sync-kalshi \
   --base-url https://external-api.kalshi.com/trade-api/v2
 ```
 
-Sportsbook h2h scores sync:
+Sportsbook moneyline, spread, and totals scores sync:
 
 ```bash
 uv run restless-gambler ledger sync-sportsbook \
-  --sport baseball_ncaa \
+  --sport baseball_mlb \
   --days-from 3
 ```
 
@@ -134,13 +152,13 @@ uv run ruff check .
 uv run pytest
 ```
 
-Current expected baseline after the sportsbook settlement work is `32 passed`.
+Current expected baseline after the cycle/calibration work is `34 passed`.
 
 ## Next Useful Work
 
-1. Add spread and totals grading rules for sportsbook settlement.
-2. Add source-backed sport-stat research signals beyond no-vig consensus.
-3. Add calibration/backtest reports once enough paper bets settle.
+1. Add source-backed MLB stat signals beyond no-vig consensus.
+2. Add closing-line comparison and richer calibration charts.
+3. Add historical backtest fixtures once enough settled paper bets exist.
 4. Add stricter live Kalshi reconciliation tables and cancellation/amend flows.
 5. Keep all new platform integrations behind product-specific adapters and risk
    gates so they do not conflict with `~/marketforge`.

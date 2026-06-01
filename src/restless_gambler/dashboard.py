@@ -10,6 +10,7 @@ import streamlit as st
 
 from restless_gambler.persistence import (
     DEFAULT_DB_PATH,
+    calibration_summary,
     evaluation_summary,
     init_database,
     ledger_status,
@@ -38,13 +39,25 @@ def main() -> None:
 
     render_metrics(data)
 
-    overview_tab, bets_tab, activity_tab, runs_tab, markets_tab = st.tabs(
-        ["Overview", "Bets", "Activity", "Runs", "Markets"]
+    (
+        overview_tab,
+        cycle_tab,
+        bets_tab,
+        calibration_tab,
+        activity_tab,
+        runs_tab,
+        markets_tab,
+    ) = st.tabs(
+        ["Overview", "Cycle", "Bets", "Calibration", "Activity", "Runs", "Markets"]
     )
     with overview_tab:
         render_overview(data)
+    with cycle_tab:
+        render_cycle(data)
     with bets_tab:
         render_bets(data["bets"])
+    with calibration_tab:
+        render_calibration(data["calibration"])
     with activity_tab:
         render_activity(data)
     with runs_tab:
@@ -63,10 +76,13 @@ def load_dashboard_data(db_path_value: str) -> dict[str, Any]:
         "summary": summarize_database(db_path),
         "ledger": ledger_status(db_path),
         "evaluation": evaluation_summary(db_path),
+        "calibration": calibration_summary(db_path),
         "exposure": open_ledger_exposure(db_path=db_path),
+        "latest_run": _query(db_path, LATEST_RUN_SQL),
         "runs": _query(db_path, RUNS_SQL),
         "bets": _query(db_path, BETS_SQL),
         "executions": _query(db_path, EXECUTIONS_SQL),
+        "risk_decisions": _query(db_path, RISK_DECISIONS_SQL),
         "research_signals": _query_optional(db_path, RESEARCH_SIGNALS_SQL),
         "opportunities": _query(db_path, OPPORTUNITIES_SQL),
         "diagnostics": _query(db_path, DIAGNOSTICS_SQL),
@@ -159,9 +175,43 @@ def render_bets(bets) -> None:
     st.dataframe(filtered, use_container_width=True, hide_index=True)
 
 
+def render_cycle(data: dict[str, Any]) -> None:
+    st.subheader("Latest Cycle State")
+    st.dataframe(data["latest_run"], use_container_width=True, hide_index=True)
+
+    rejected = data["risk_decisions"]
+    if not rejected.empty:
+        rejected = rejected[rejected["status"] == "rejected"]
+    st.subheader("Risk Rejections")
+    st.dataframe(rejected, use_container_width=True, hide_index=True)
+
+    st.subheader("Open Ledger")
+    st.dataframe(data["ledger"]["open_bets"], use_container_width=True, hide_index=True)
+
+
+def render_calibration(calibration: dict[str, Any]) -> None:
+    overall = calibration["overall"]
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Settled", overall["settled_count"])
+    col2.metric("Graded", overall["graded_count"])
+    col3.metric("Hit Rate", _percent(overall["hit_rate"]))
+    col4.metric("Brier", _number(overall["brier_score"]))
+
+    st.subheader("By Venue")
+    st.dataframe(calibration["by_venue"], use_container_width=True, hide_index=True)
+    st.subheader("By EV Bucket")
+    st.dataframe(
+        calibration["by_expected_value_bucket"],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def render_activity(data: dict[str, Any]) -> None:
     st.subheader("Research Signals")
     st.dataframe(data["research_signals"], use_container_width=True, hide_index=True)
+    st.subheader("Risk Decisions")
+    st.dataframe(data["risk_decisions"], use_container_width=True, hide_index=True)
     st.subheader("Executions")
     st.dataframe(data["executions"], use_container_width=True, hide_index=True)
     st.subheader("Opportunities")
@@ -206,6 +256,27 @@ def _money(value: object) -> str:
     return f"${float(value or 0.0):,.2f}"
 
 
+def _percent(value: object) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):.1%}"
+
+
+def _number(value: object) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):.4f}"
+
+
+LATEST_RUN_SQL = """
+SELECT run_id, timestamp, runtime_mode, status, market_count, bet_count,
+       data_source_json, warnings_json, errors_json, artifact_path, imported_at
+FROM runs
+ORDER BY timestamp DESC, imported_at DESC
+LIMIT 1
+"""
+
+
 RUNS_SQL = """
 SELECT run_id, timestamp, runtime_mode, status, market_count, bet_count,
        cash, equity, realized_pnl, imported_at
@@ -230,6 +301,13 @@ SELECT run_id, client_order_id, venue, product_type, market_id, outcome_id,
        filled_units, average_fill_price, rejection_reason, submitted_at
 FROM executions
 ORDER BY submitted_at DESC, run_id DESC
+LIMIT 1000
+"""
+
+RISK_DECISIONS_SQL = """
+SELECT run_id, client_order_id, status, reason, checks_json
+FROM risk_decisions
+ORDER BY run_id DESC, status DESC, client_order_id
 LIMIT 1000
 """
 

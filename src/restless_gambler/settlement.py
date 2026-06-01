@@ -187,11 +187,6 @@ def sync_sportsbook_paper_settlements(
         client_order_id = str(bet["client_order_id"])
         market_id = str(bet["market_id"])
         event_id = str(bet.get("event_id") or "")
-        outcome_id = str(bet["outcome_id"])
-
-        if not _is_h2h_sportsbook_market(market_id):
-            open_or_unresolved += 1
-            continue
 
         score_event = scores_by_event.get(event_id)
         if score_event is None:
@@ -199,9 +194,9 @@ def sync_sportsbook_paper_settlements(
             continue
 
         try:
-            settlement_outcome = _sportsbook_h2h_settlement_outcome(
+            settlement_outcome = _sportsbook_settlement_outcome(
                 score_event=score_event,
-                bet_outcome_id=outcome_id,
+                bet=bet,
             )
         except ValueError as error:
             errors.append(
@@ -264,6 +259,41 @@ def _market_settlement_outcome(
     return "won" if bet_outcome_id == winning_outcome_id else "lost"
 
 
+def _sportsbook_settlement_outcome(
+    *,
+    score_event: SportsScoreEvent,
+    bet: dict[str, object],
+) -> str | None:
+    if not score_event.completed:
+        return None
+
+    metadata = bet.get("outcome_metadata")
+    outcome_metadata = metadata if isinstance(metadata, dict) else {}
+    market_id = str(bet["market_id"])
+    market_key = str(
+        outcome_metadata.get("market_key") or _market_key_from_market_id(market_id)
+    )
+
+    if market_key == "h2h":
+        return _sportsbook_h2h_settlement_outcome(
+            score_event=score_event,
+            bet_outcome_id=str(bet["outcome_id"]),
+        )
+    if market_key == "spreads":
+        return _sportsbook_spread_settlement_outcome(
+            score_event=score_event,
+            outcome_name=str(bet["outcome_name"]),
+            outcome_metadata=outcome_metadata,
+        )
+    if market_key == "totals":
+        return _sportsbook_total_settlement_outcome(
+            score_event=score_event,
+            outcome_name=str(bet["outcome_name"]),
+            outcome_metadata=outcome_metadata,
+        )
+    return None
+
+
 def _sportsbook_h2h_settlement_outcome(
     *,
     score_event: SportsScoreEvent,
@@ -283,5 +313,90 @@ def _sportsbook_h2h_settlement_outcome(
     return "won" if sports_outcome_id(winning_team) == bet_outcome_id else "lost"
 
 
-def _is_h2h_sportsbook_market(market_id: str) -> bool:
-    return market_id.endswith("-h2h")
+def _sportsbook_spread_settlement_outcome(
+    *,
+    score_event: SportsScoreEvent,
+    outcome_name: str,
+    outcome_metadata: dict[object, object],
+) -> str:
+    point = _metadata_point(outcome_metadata)
+    team_name = _metadata_raw_name(outcome_metadata, outcome_name, point)
+    team_score = _score_for_team(score_event, team_name)
+    opponent_score = _opponent_score(score_event, team_name)
+    adjusted_score = team_score + point
+    if adjusted_score == opponent_score:
+        return "push"
+    return "won" if adjusted_score > opponent_score else "lost"
+
+
+def _sportsbook_total_settlement_outcome(
+    *,
+    score_event: SportsScoreEvent,
+    outcome_name: str,
+    outcome_metadata: dict[object, object],
+) -> str:
+    point = _metadata_point(outcome_metadata)
+    side = str(outcome_metadata.get("raw_name") or outcome_name).lower()
+    total_score = sum(score_event.scores.values())
+    if total_score == point:
+        return "push"
+    if side.startswith("over"):
+        return "won" if total_score > point else "lost"
+    if side.startswith("under"):
+        return "won" if total_score < point else "lost"
+    msg = f"unsupported totals outcome: {outcome_name}"
+    raise ValueError(msg)
+
+
+def _market_key_from_market_id(market_id: str) -> str:
+    for market_key in ("h2h", "spreads", "totals"):
+        if market_id.endswith(f"-{market_key}"):
+            return market_key
+    return ""
+
+
+def _metadata_point(outcome_metadata: dict[object, object]) -> float:
+    point = outcome_metadata.get("point")
+    if point is None:
+        msg = "spread/total settlement requires point metadata"
+        raise ValueError(msg)
+    return float(point)
+
+
+def _metadata_raw_name(
+    outcome_metadata: dict[object, object],
+    outcome_name: str,
+    point: float,
+) -> str:
+    raw_name = outcome_metadata.get("raw_name")
+    if raw_name:
+        return str(raw_name)
+    suffix = f" {point:g}"
+    return outcome_name.removesuffix(suffix)
+
+
+def _score_for_team(score_event: SportsScoreEvent, team_name: str) -> float:
+    if team_name in score_event.scores:
+        return score_event.scores[team_name]
+    team_id = sports_outcome_id(team_name)
+    for name, score in score_event.scores.items():
+        if sports_outcome_id(name) == team_id:
+            return score
+    msg = f"team score not found for {team_name} in {score_event.event_id}"
+    raise ValueError(msg)
+
+
+def _opponent_score(score_event: SportsScoreEvent, team_name: str) -> float:
+    team_id = sports_outcome_id(team_name)
+    opponents = [
+        score
+        for name, score in score_event.scores.items()
+        if sports_outcome_id(name) != team_id
+    ]
+    if len(opponents) != 1:
+        msg = (
+            "spread settlement requires exactly one opponent in "
+            f"{score_event.event_id}"
+        )
+        raise ValueError(msg)
+    return opponents[0]

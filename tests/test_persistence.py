@@ -7,6 +7,7 @@ import duckdb
 
 from restless_gambler.config import load_config
 from restless_gambler.persistence import (
+    calibration_summary,
     evaluation_summary,
     import_run_artifact,
     ledger_status,
@@ -79,6 +80,7 @@ def test_ledger_status_and_manual_settlement(tmp_path):
     )
     after = ledger_status(db_path)
     eval_summary = evaluation_summary(db_path)
+    calibration = calibration_summary(db_path)
     bet_summary = next(
         row
         for row in eval_summary["paper_bets_by_venue"]
@@ -93,6 +95,11 @@ def test_ledger_status_and_manual_settlement(tmp_path):
     assert bet_summary["settled_count"] >= 1
     assert bet_summary["won_count"] >= 1
     assert bet_summary["hit_rate"] == 1.0
+    assert calibration["overall"]["settled_count"] == 1
+    assert calibration["overall"]["graded_count"] == 1
+    assert calibration["overall"]["hit_rate"] == 1.0
+    assert calibration["overall"]["brier_score"] is not None
+    assert calibration["by_expected_value_bucket"]
 
 
 def test_live_run_import_does_not_populate_paper_ledger(tmp_path):

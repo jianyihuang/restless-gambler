@@ -27,6 +27,7 @@ from restless_gambler.namespace import namespace_report
 from restless_gambler.paths import DATA_DIR
 from restless_gambler.persistence import (
     DEFAULT_DB_PATH,
+    calibration_summary,
     evaluation_summary,
     import_run_artifact,
     init_database,
@@ -55,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return run_command(args)
+    if args.command == "cycle":
+        return cycle_command(args)
     if args.command == "dashboard":
         return dashboard_command(args)
     if args.command == "data" and args.data_command == "fetch-kalshi":
@@ -87,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         return live_reconcile_kalshi_command(args)
     if args.command == "eval" and args.eval_command == "summary":
         return eval_summary_command(args)
+    if args.command == "eval" and args.eval_command == "calibration":
+        return eval_calibration_command(args)
     if args.command == "doctor" and args.doctor_command == "namespace":
         return doctor_namespace_command(args)
     if args.command == "credentials" and args.credentials_command == "check-kalshi":
@@ -189,6 +194,127 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-live",
         action="store_true",
         help="required with --mode live before any live platform order is submitted",
+    )
+
+    cycle_parser = subparsers.add_parser(
+        "cycle",
+        help="run the paper fetch, merge, trade, persist, and settlement workflow",
+    )
+    cycle_parser.add_argument(
+        "--sport",
+        default="baseball_mlb",
+        help="The Odds API sport key for the focused paper cycle",
+    )
+    cycle_parser.add_argument(
+        "--regions",
+        default="us",
+        help="comma-delimited bookmaker regions such as us, us2, uk, eu, au",
+    )
+    cycle_parser.add_argument(
+        "--markets",
+        default="h2h,spreads,totals",
+        help="comma-delimited market keys such as h2h,spreads,totals",
+    )
+    cycle_parser.add_argument(
+        "--bookmakers",
+        default=None,
+        help="optional comma-delimited bookmaker keys",
+    )
+    cycle_parser.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        default=None,
+        help="run date in YYYY-MM-DD format",
+    )
+    cycle_parser.add_argument(
+        "--kalshi-limit",
+        type=int,
+        default=50,
+        help="maximum open Kalshi markets to fetch",
+    )
+    cycle_parser.add_argument(
+        "--skip-orderbooks",
+        action="store_true",
+        help="skip Kalshi per-market orderbook requests",
+    )
+    cycle_parser.add_argument(
+        "--orderbook-depth",
+        type=int,
+        default=1,
+        help="Kalshi orderbook depth to fetch for each market",
+    )
+    cycle_parser.add_argument(
+        "--kalshi-output",
+        type=Path,
+        default=DATA_DIR / "markets" / "kalshi_latest.json",
+        help="path where the normalized Kalshi snapshot is written",
+    )
+    cycle_parser.add_argument(
+        "--sportsbook-output",
+        type=Path,
+        default=DATA_DIR / "markets" / "sports_odds_latest.json",
+        help="path where the normalized sportsbook snapshot is written",
+    )
+    cycle_parser.add_argument(
+        "--merged-output",
+        type=Path,
+        default=DATA_DIR / "markets" / "merged_latest.json",
+        help="path where the merged snapshot is written",
+    )
+    cycle_parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=DEFAULT_ARTIFACTS_DIR,
+        help="directory where run artifacts are written",
+    )
+    cycle_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
+    cycle_parser.add_argument(
+        "--min-expected-value",
+        type=float,
+        default=None,
+        help="minimum expected value after estimated fees",
+    )
+    cycle_parser.add_argument(
+        "--min-liquidity",
+        type=float,
+        default=0.0,
+        help="minimum normalized liquidity/activity required for a market",
+    )
+    cycle_parser.add_argument(
+        "--max-order-cost",
+        type=float,
+        default=1.0,
+        dest="max_wager_cost",
+        help="maximum cost for one paper wager intent",
+    )
+    cycle_parser.add_argument(
+        "--max-contracts",
+        "--max-units",
+        type=int,
+        default=1,
+        dest="max_units_per_wager",
+        help="maximum contracts/stake units per paper wager intent",
+    )
+    cycle_parser.add_argument(
+        "--settlement-days-from",
+        type=int,
+        default=3,
+        help="completed-score lookback in days; The Odds API accepts 1 to 3",
+    )
+    cycle_parser.add_argument(
+        "--skip-settlement-sync",
+        action="store_true",
+        help="skip read-only settlement sync after the paper run",
+    )
+    cycle_parser.add_argument(
+        "--allow-duplicate-open-ledger",
+        action="store_true",
+        help="disable the open-ledger duplicate guard during the cycle run",
     )
 
     dashboard_parser = subparsers.add_parser(
@@ -486,6 +612,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DB_PATH,
         help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
     )
+    eval_calibration_parser = eval_subparsers.add_parser(
+        "calibration",
+        help="summarize settled paper-bet calibration and EV bucket performance",
+    )
+    eval_calibration_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
 
     live_parser = subparsers.add_parser(
         "live",
@@ -634,6 +770,131 @@ def _snapshot_venues(path: Path) -> set[str]:
         for market in markets
         if isinstance(market, dict) and market.get("venue")
     }
+
+
+def cycle_command(args) -> int:
+    warnings: list[str] = []
+    try:
+        kalshi_fetch = fetch_kalshi_market_data(
+            max_markets=args.kalshi_limit,
+            include_orderbooks=not args.skip_orderbooks,
+            orderbook_depth=args.orderbook_depth,
+        )
+        kalshi_path = write_kalshi_market_snapshot(
+            output_path=args.kalshi_output,
+            fetch=kalshi_fetch,
+        )
+        sports_fetch = fetch_sports_odds(
+            sport=args.sport,
+            regions=args.regions,
+            markets=args.markets,
+            bookmakers=args.bookmakers,
+        )
+        sportsbook_path = write_sports_odds_snapshot(
+            output_path=args.sportsbook_output,
+            fetch=sports_fetch,
+        )
+        merged_path = merge_market_snapshot_files(
+            input_paths=[kalshi_path, sportsbook_path],
+            output_path=args.merged_output,
+        )
+        allowed_venues = tuple(
+            sorted(set(DEFAULT_ALLOWED_VENUES) | _snapshot_venues(merged_path))
+        )
+        config = load_config(
+            mode="paper",
+            as_of=args.as_of,
+            markets_path=merged_path,
+            artifacts_dir=args.artifacts_dir,
+            min_expected_value=args.min_expected_value,
+            min_liquidity=args.min_liquidity,
+            max_wager_cost=args.max_wager_cost,
+            max_units_per_wager=args.max_units_per_wager,
+            allowed_venues=allowed_venues,
+        )
+        run_id = build_run_id(config.mode, config.strategy.name, config.as_of)
+        duplicate_guard_enabled = not args.allow_duplicate_open_ledger
+        blocked_wagers = (
+            open_ledger_wager_keys(db_path=args.db_path, exclude_run_id=run_id)
+            if duplicate_guard_enabled
+            else set()
+        )
+        exposure = (
+            open_ledger_exposure(db_path=args.db_path, exclude_run_id=run_id)
+            if duplicate_guard_enabled
+            else {"total_cost": 0.0, "by_market": {}}
+        )
+        artifact_path = RestlessGamblerRunner(
+            config,
+            blocked_wagers=blocked_wagers,
+            existing_total_exposure=float(exposure["total_cost"]),
+            existing_market_exposure={
+                str(market_id): float(cost)
+                for market_id, cost in dict(exposure["by_market"]).items()
+            },
+        ).run()
+        import_summary = import_run_artifact(
+            artifact_path=artifact_path,
+            db_path=args.db_path,
+        )
+    except (OSError, ValueError) as error:
+        print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
+        return 1
+
+    settlement_sync: dict[str, object] = {}
+    if not args.skip_settlement_sync:
+        try:
+            kalshi_sync = sync_kalshi_paper_settlements(
+                db_path=args.db_path,
+                limit=100,
+            )
+            settlement_sync["kalshi"] = kalshi_sync.to_dict()
+            if kalshi_sync.errors:
+                warnings.append(
+                    f"Kalshi settlement sync had {len(kalshi_sync.errors)} error(s)"
+                )
+        except (OSError, ValueError) as error:
+            warnings.append(f"Kalshi settlement sync skipped: {error}")
+        if args.sport != "upcoming":
+            try:
+                sportsbook_sync = sync_sportsbook_paper_settlements(
+                    db_path=args.db_path,
+                    sport=args.sport,
+                    days_from=args.settlement_days_from,
+                    limit=100,
+                )
+                settlement_sync["sportsbook"] = sportsbook_sync.to_dict()
+                if sportsbook_sync.errors:
+                    warnings.append(
+                        "Sportsbook settlement sync had "
+                        f"{len(sportsbook_sync.errors)} error(s)"
+                    )
+            except (OSError, ValueError) as error:
+                warnings.append(f"Sportsbook settlement sync skipped: {error}")
+
+    payload = {
+        "cycle": {
+            "sport": args.sport,
+            "regions": args.regions,
+            "markets": args.markets,
+        },
+        "snapshots": {
+            "kalshi": str(kalshi_path),
+            "sportsbook": str(sportsbook_path),
+            "merged": str(merged_path),
+        },
+        "run": {
+            "artifact_path": str(artifact_path),
+            "import": import_summary.to_dict(),
+        },
+        "settlement_sync": settlement_sync,
+        "db": summarize_database(args.db_path),
+        "ledger": ledger_status(args.db_path),
+        "calibration": calibration_summary(args.db_path),
+        "warnings": warnings,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
 
 
 def dashboard_command(args) -> int:
@@ -789,6 +1050,11 @@ def ledger_sync_sportsbook_command(args) -> int:
 
 def eval_summary_command(args) -> int:
     print(json.dumps(evaluation_summary(args.db_path), indent=2, sort_keys=True))
+    return 0
+
+
+def eval_calibration_command(args) -> int:
+    print(json.dumps(calibration_summary(args.db_path), indent=2, sort_keys=True))
     return 0
 
 

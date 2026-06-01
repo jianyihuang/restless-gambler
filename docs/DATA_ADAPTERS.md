@@ -53,7 +53,7 @@ Set `THE_ODDS_API_KEY` in `.env` before fetching.
 The sports odds adapter:
 
 - Calls The Odds API read-only odds endpoint.
-- Calls The Odds API read-only scores endpoint for h2h paper settlement.
+- Calls The Odds API read-only scores endpoint for sportsbook paper settlement.
 - Normalizes bookmaker odds into one `sportsbook` market per event/bookmaker
   market.
 - Stores bookmaker market/outcome metadata so the research layer can compare
@@ -82,16 +82,16 @@ uv run restless-gambler run \
 `--allow-snapshot-venues` is rejected in live mode. For narrower paper tests,
 repeat `--allowed-venue` instead of allowing every venue in the snapshot.
 
-Settle completed h2h paper bets from scores:
+Settle completed moneyline, spread, and totals paper bets from scores:
 
 ```bash
 uv run restless-gambler ledger sync-sportsbook \
-  --sport baseball_ncaa \
+  --sport baseball_mlb \
   --days-from 3
 ```
 
-The first settlement sync handles moneyline/h2h outcomes only. Spreads and totals
-need market-specific grading rules before they should be automated.
+Spread and totals grading requires the `point` metadata provided by normalized
+The Odds API snapshots.
 
 Execution should remain paper-only unless a platform provides an official,
 legal account API for bet placement.

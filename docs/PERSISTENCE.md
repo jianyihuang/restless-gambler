@@ -39,6 +39,7 @@ Inspect state:
 uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
+uv run restless-gambler eval calibration
 ```
 
 Launch the local dashboard:
@@ -84,11 +85,12 @@ status and a clear binary `result`. Passing `--include-determined` also settles
 markets in `determined` or `amended` status, which may be useful for early
 paper evaluation but can change if the result is disputed before finalization.
 
-Sync completed h2h sportsbook paper bets from The Odds API scores:
+Sync completed sportsbook moneyline, spread, and totals paper bets from The Odds
+API scores:
 
 ```bash
 uv run restless-gambler ledger sync-sportsbook \
-  --sport baseball_ncaa \
+  --sport baseball_mlb \
   --days-from 3
 ```
 
@@ -114,9 +116,8 @@ settled paper bets.
 
 ## Current Limits
 
-- Sports settlement sync currently handles The Odds API h2h/moneyline events
-  only. Spreads and totals still need market-specific grading rules.
+- Sports settlement sync currently handles The Odds API moneyline, spreads, and
+  totals when point metadata is present.
 - Kalshi sync is read-only and only uses market status/result. It does not query
   live account positions.
-- Calibration metrics are still scaffolding-level summaries until more settled
-  paper data exists.
+- Calibration metrics stay sparse until enough paper bets settle.

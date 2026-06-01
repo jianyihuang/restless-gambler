@@ -235,12 +235,17 @@ def open_paper_bets(
             SELECT l.client_order_id, l.first_run_id, l.latest_run_id, l.venue,
                    l.product_type, l.market_id, l.outcome_id, l.outcome_name,
                    l.action, l.units, l.price, l.price_format, l.fee, l.cost,
-                   l.expected_value, l.filled_at, m.event_id, m.category
+                   l.expected_value, l.filled_at, m.event_id, m.category,
+                   oq.metadata_json
             FROM paper_bet_ledger l
             LEFT JOIN markets m
               ON m.run_id = l.latest_run_id
              AND m.venue = l.venue
              AND m.market_id = l.market_id
+            LEFT JOIN outcome_quotes oq
+              ON oq.run_id = l.latest_run_id
+             AND oq.market_id = l.market_id
+             AND oq.outcome_id = l.outcome_id
             WHERE {" AND ".join(f"l.{clause}" for clause in where)}
             ORDER BY l.filled_at, l.client_order_id
             LIMIT ?
@@ -268,6 +273,7 @@ def open_paper_bets(
             "filled_at": row[15],
             "event_id": row[16],
             "category": row[17],
+            "outcome_metadata": _loads_json_object(row[18]),
         }
         for row in rows
     ]
@@ -389,6 +395,142 @@ def evaluation_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
                 "realized_pnl": round(row[10], 2),
             }
             for row in bet_rows
+        ],
+    }
+
+
+def calibration_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
+    _ensure_database_exists(db_path)
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        overall = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.realized_pnl, f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT COUNT(*) AS settled_count,
+                   COUNT(actual) AS graded_count,
+                   SUM(CASE WHEN settlement_status = 'won' THEN 1 ELSE 0 END)
+                     AS won_count,
+                   SUM(CASE WHEN settlement_status = 'lost' THEN 1 ELSE 0 END)
+                     AS lost_count,
+                   SUM(CASE WHEN settlement_status = 'push' THEN 1 ELSE 0 END)
+                     AS push_count,
+                   AVG(actual) AS hit_rate,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+            FROM settled
+            """
+        ).fetchone()
+        by_venue_rows = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.venue, l.product_type,
+                       l.realized_pnl, f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT venue, product_type,
+                   COUNT(*) AS settled_count,
+                   COUNT(actual) AS graded_count,
+                   AVG(actual) AS hit_rate,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+            FROM settled
+            GROUP BY venue, product_type
+            ORDER BY settled_count DESC, realized_pnl DESC
+            """
+        ).fetchall()
+        by_ev_bucket_rows = con.execute(
+            """
+            WITH settled AS (
+                SELECT l.settlement_status, l.expected_value, l.realized_pnl,
+                       f.fair_probability,
+                       CASE
+                         WHEN l.settlement_status = 'won' THEN 1.0
+                         WHEN l.settlement_status = 'lost' THEN 0.0
+                         ELSE NULL
+                       END AS actual
+                FROM paper_bet_ledger l
+                LEFT JOIN forecasts f
+                  ON f.run_id = l.latest_run_id
+                 AND f.market_id = l.market_id
+                 AND f.outcome_id = l.outcome_id
+                WHERE l.settlement_status IN ('won', 'lost', 'push')
+            )
+            SELECT CASE
+                     WHEN expected_value < 0.03 THEN '<3%'
+                     WHEN expected_value < 0.05 THEN '3-5%'
+                     WHEN expected_value < 0.10 THEN '5-10%'
+                     WHEN expected_value < 0.25 THEN '10-25%'
+                     ELSE '25%+'
+                   END AS expected_value_bucket,
+                   COUNT(*) AS settled_count,
+                   COUNT(actual) AS graded_count,
+                   AVG(expected_value) AS average_expected_value,
+                   AVG(actual) AS hit_rate,
+                   AVG(POWER(fair_probability - actual, 2)) AS brier_score,
+                   COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+            FROM settled
+            GROUP BY expected_value_bucket
+            ORDER BY MIN(expected_value)
+            """
+        ).fetchall()
+
+    return {
+        "db_path": str(db_path),
+        "overall": {
+            "settled_count": int(overall[0] or 0),
+            "graded_count": int(overall[1] or 0),
+            "won_count": int(overall[2] or 0),
+            "lost_count": int(overall[3] or 0),
+            "push_count": int(overall[4] or 0),
+            "hit_rate": _round_optional(overall[5], 4),
+            "brier_score": _round_optional(overall[6], 4),
+            "realized_pnl": round(overall[7] or 0.0, 2),
+        },
+        "by_venue": [
+            {
+                "venue": row[0],
+                "product_type": row[1],
+                "settled_count": row[2],
+                "graded_count": row[3],
+                "hit_rate": _round_optional(row[4], 4),
+                "brier_score": _round_optional(row[5], 4),
+                "realized_pnl": round(row[6] or 0.0, 2),
+            }
+            for row in by_venue_rows
+        ],
+        "by_expected_value_bucket": [
+            {
+                "expected_value_bucket": row[0],
+                "settled_count": row[1],
+                "graded_count": row[2],
+                "average_expected_value": round(row[3] or 0.0, 4),
+                "hit_rate": _round_optional(row[4], 4),
+                "brier_score": _round_optional(row[5], 4),
+                "realized_pnl": round(row[6] or 0.0, 2),
+            }
+            for row in by_ev_bucket_rows
         ],
     }
 
@@ -1169,6 +1311,12 @@ def _hit_rate(*, won_count: int, lost_count: int) -> float | None:
     return round(won_count / graded_count, 4)
 
 
+def _round_optional(value: object, digits: int) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
 def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
     try:
         return con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -1178,6 +1326,16 @@ def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
 
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True)
+
+
+def _loads_json_object(value: object) -> dict[str, object]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _now() -> str:

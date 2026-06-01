@@ -192,3 +192,154 @@ def test_sync_sportsbook_paper_settlements_updates_h2h_bets(
     assert summary.open_or_unresolved == 0
     assert summary.settlements[0]["settlement_status"] == "won"
     assert any(row["settlement_status"] == "won" for row in ledger["summary"])
+
+
+def test_sync_sportsbook_paper_settlements_grades_spreads_and_totals(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot_path = tmp_path / "sportsbook_snapshot.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "source": "test_sportsbook_snapshot",
+                "generated_at": "2026-05-31T00:00:00Z",
+                "markets": [
+                    {
+                        "market_id": "draftkings-event-1-spreads",
+                        "event_id": "event-1",
+                        "venue": "draftkings",
+                        "product_type": "sportsbook",
+                        "title": "Liberty Flames at Arkansas Razorbacks spreads",
+                        "category": "baseball_ncaa",
+                        "status": "open",
+                        "close_time": "2026-06-01T23:00:00Z",
+                        "liquidity": 100.0,
+                        "volume": 100.0,
+                        "rules_summary": "Test sportsbook spread fixture.",
+                        "outcomes": [
+                            {
+                                "outcome_id": "liberty-flames-1.5",
+                                "name": "Liberty Flames 1.5",
+                                "price": 100,
+                                "price_format": "american",
+                                "metadata": {
+                                    "baseline_adjustment": 0.1,
+                                    "raw_name": "Liberty Flames",
+                                    "point": 1.5,
+                                    "market_key": "spreads",
+                                },
+                            },
+                            {
+                                "outcome_id": "arkansas-razorbacks--1.5",
+                                "name": "Arkansas Razorbacks -1.5",
+                                "price": -110,
+                                "price_format": "american",
+                                "metadata": {
+                                    "baseline_adjustment": -0.02,
+                                    "raw_name": "Arkansas Razorbacks",
+                                    "point": -1.5,
+                                    "market_key": "spreads",
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "market_id": "draftkings-event-1-totals",
+                        "event_id": "event-1",
+                        "venue": "draftkings",
+                        "product_type": "sportsbook",
+                        "title": "Liberty Flames at Arkansas Razorbacks totals",
+                        "category": "baseball_ncaa",
+                        "status": "open",
+                        "close_time": "2026-06-01T23:00:00Z",
+                        "liquidity": 100.0,
+                        "volume": 100.0,
+                        "rules_summary": "Test sportsbook total fixture.",
+                        "outcomes": [
+                            {
+                                "outcome_id": "over-8.5",
+                                "name": "Over 8.5",
+                                "price": 100,
+                                "price_format": "american",
+                                "metadata": {
+                                    "baseline_adjustment": 0.1,
+                                    "raw_name": "Over",
+                                    "point": 8.5,
+                                    "market_key": "totals",
+                                },
+                            },
+                            {
+                                "outcome_id": "under-8.5",
+                                "name": "Under 8.5",
+                                "price": -110,
+                                "price_format": "american",
+                                "metadata": {
+                                    "baseline_adjustment": -0.02,
+                                    "raw_name": "Under",
+                                    "point": 8.5,
+                                    "market_key": "totals",
+                                },
+                            },
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            markets_path=snapshot_path,
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+            max_wager_cost=1.0,
+            max_units_per_wager=1,
+            allowed_venues=DEFAULT_ALLOWED_VENUES + ("draftkings",),
+        )
+    ).run()
+    db_path = tmp_path / "restless.duckdb"
+    import_run_artifact(artifact_path=artifact_path, db_path=db_path)
+
+    def fake_fetch_sports_scores(*, sport, days_from=3, base_url=None):
+        return SportsScoresFetch(
+            events=[
+                SportsScoreEvent(
+                    event_id="event-1",
+                    sport_key=sport,
+                    completed=True,
+                    home_team="Arkansas Razorbacks",
+                    away_team="Liberty Flames",
+                    scores={
+                        "Liberty Flames": 5,
+                        "Arkansas Razorbacks": 4,
+                    },
+                    last_update="2026-06-01T23:00:00Z",
+                    raw={},
+                )
+            ],
+            raw_event_count=1,
+            base_url="https://api.the-odds-api.com/v4",
+            sport=sport,
+            days_from=days_from,
+            generated_at="2026-06-02T00:00:00Z",
+        )
+
+    monkeypatch.setattr(
+        "restless_gambler.settlement.fetch_sports_scores",
+        fake_fetch_sports_scores,
+    )
+
+    summary = sync_sportsbook_paper_settlements(
+        db_path=db_path,
+        sport="baseball_ncaa",
+    )
+    ledger = ledger_status(db_path)
+
+    assert summary.checked == 2
+    assert summary.settled == 2
+    assert summary.open_or_unresolved == 0
+    assert {row["settlement_status"] for row in summary.settlements} == {"won"}
+    assert any(row["settlement_status"] == "won" for row in ledger["summary"])

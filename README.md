@@ -51,6 +51,19 @@ python -m pytest
 
 The run writes an artifact under `reports/runs/`.
 
+Run the current end-to-end paper automation cycle:
+
+```bash
+uv run restless-gambler cycle \
+  --sport baseball_mlb \
+  --max-contracts 1 \
+  --max-order-cost 1
+```
+
+`cycle` fetches Kalshi markets, fetches sportsbook odds, merges snapshots, runs
+paper execution with real snapshot venues enabled, persists the run, syncs
+settlements, and prints a JSON summary.
+
 ## Real Kalshi Read-Only Data
 
 Fetch open Kalshi markets into the generic snapshot schema:
@@ -98,6 +111,7 @@ Inspect stored runs, the paper ledger, and evaluation summary:
 uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
+uv run restless-gambler eval calibration
 ```
 
 Launch the local dashboard:
@@ -141,11 +155,12 @@ uv run restless-gambler ledger sync-kalshi \
   --base-url https://external-api.kalshi.com/trade-api/v2
 ```
 
-Sync sportsbook h2h paper bets from The Odds API scores:
+Sync sportsbook moneyline, spread, and totals paper bets from The Odds API
+scores:
 
 ```bash
 uv run restless-gambler ledger sync-sportsbook \
-  --sport baseball_ncaa \
+  --sport baseball_mlb \
   --days-from 3
 ```
 
@@ -201,8 +216,8 @@ uv run restless-gambler data merge-snapshots \
 1. Add real external research adapters for market rules, official data, and news.
 2. Expand source-backed models beyond sportsbook consensus into weather,
    economic, and sport-stat signals.
-3. Expand sportsbook settlement beyond h2h into spreads and totals.
-4. Add calibration/backtest metrics before scaling any real order placement.
+3. Add richer calibration charts and closing-line comparison.
+4. Add sport-stat ingestion for the focused MLB paper cycle.
 5. Add venue-specific execution only where legal account access and platform
    APIs allow it.
 6. Add stricter live Kalshi reconciliation tables and cancellation/amend flows.
