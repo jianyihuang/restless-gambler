@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Ruff and pytest
+    name: Ruff, pytest, and smoke checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -41,3 +41,16 @@ jobs:
 
       - name: Run pytest
         run: uv run --frozen pytest
+
+      - name: Run namespace doctor
+        run: uv run --frozen restless-gambler doctor namespace
+
+      - name: Build package
+        run: uv build --out-dir "$RUNNER_TEMP/dist"
+
+      - name: Smoke test fixture paper run
+        run: |
+          uv run --frozen restless-gambler run \
+            --mode paper \
+            --as-of 2026-05-31 \
+            --artifacts-dir "$RUNNER_TEMP/restless-gambler-runs"

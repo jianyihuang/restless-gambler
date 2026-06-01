@@ -44,11 +44,13 @@ uv run pytest
 ```
 
 GitHub Actions runs the same default checks on pull requests and pushes to
-`main`:
+`main`, plus a namespace doctor, package build, and fixture-only paper smoke
+run:
 
 ```bash
 uv run ruff check .
 uv run pytest
+uv run restless-gambler doctor namespace
 ```
 
 Without `uv`, use any Python 3.12 environment and install the project in editable
