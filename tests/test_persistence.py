@@ -8,6 +8,7 @@ import duckdb
 from restless_gambler.config import load_config
 from restless_gambler.persistence import (
     calibration_summary,
+    closing_line_summary,
     evaluation_summary,
     import_run_artifact,
     ledger_status,
@@ -16,6 +17,7 @@ from restless_gambler.persistence import (
     open_paper_bets,
     settle_paper_bet,
     summarize_database,
+    sync_paper_bet_lines,
 )
 from restless_gambler.runner import RestlessGamblerRunner
 
@@ -100,6 +102,58 @@ def test_ledger_status_and_manual_settlement(tmp_path):
     assert calibration["overall"]["hit_rate"] == 1.0
     assert calibration["overall"]["brier_score"] is not None
     assert calibration["by_expected_value_bucket"]
+
+
+def test_sync_paper_bet_lines_tracks_latest_prices(tmp_path):
+    artifact_path = RestlessGamblerRunner(
+        load_config(
+            mode="paper",
+            as_of=date(2026, 5, 31),
+            artifacts_dir=tmp_path / "runs",
+            min_liquidity=0.0,
+        )
+    ).run()
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    db_path = tmp_path / "restless.duckdb"
+    import_run_artifact(artifact_path=artifact_path, db_path=db_path)
+
+    first_bet = payload["bets"][0]
+    snapshot = {
+        "source": "test_latest_lines",
+        "generated_at": "2026-06-01T00:00:00Z",
+        "markets": payload["markets"],
+    }
+    for market in snapshot["markets"]:
+        if market["market_id"] != first_bet["market_id"]:
+            continue
+        for outcome in market["outcomes"]:
+            if outcome["outcome_id"] != first_bet["outcome_id"]:
+                continue
+            if outcome["price_format"] == "probability":
+                outcome["price"] = min(0.99, float(outcome["price"]) + 0.05)
+                outcome["ask"] = outcome["price"]
+            elif float(outcome["price"]) > 0:
+                outcome["price"] = max(100.0, float(outcome["price"]) - 20.0)
+            else:
+                outcome["price"] = float(outcome["price"]) - 20.0
+
+    snapshot_path = tmp_path / "latest_lines.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    line_sync = sync_paper_bet_lines(
+        markets_path=snapshot_path,
+        db_path=db_path,
+        checked_at="2026-06-01T00:01:00Z",
+    )
+    summary = closing_line_summary(db_path)
+
+    assert line_sync.matched >= 1
+    assert any(
+        snapshot["client_order_id"] == first_bet["client_order_id"]
+        for snapshot in line_sync.snapshots
+    )
+    assert summary["overall"]["tracked_count"] >= 1
+    assert summary["latest"][0]["client_order_id"]
 
 
 def test_live_run_import_does_not_populate_paper_ledger(tmp_path):

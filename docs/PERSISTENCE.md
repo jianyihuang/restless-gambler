@@ -40,6 +40,7 @@ uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
+uv run restless-gambler eval closing-lines
 ```
 
 Launch the local dashboard:
@@ -94,6 +95,14 @@ uv run restless-gambler ledger sync-sportsbook \
   --days-from 3
 ```
 
+Snapshot latest/closing lines for every open paper bet that still appears in a
+market snapshot:
+
+```bash
+uv run restless-gambler ledger sync-lines \
+  --markets-path data/markets/merged_latest.json
+```
+
 ## Tables
 
 The importer writes run-scoped tables for:
@@ -114,6 +123,10 @@ The importer writes run-scoped tables for:
 It also maintains `paper_bet_ledger`, keyed by `client_order_id`, for open and
 settled paper bets.
 
+`paper_line_snapshots` stores latest quote snapshots for open paper bets. The
+evaluation command compares entry implied probability to the latest observed
+implied probability; positive deltas mean the line moved toward the paper bet.
+
 ## Current Limits
 
 - Sports settlement sync currently handles The Odds API moneyline, spreads, and
@@ -121,3 +134,5 @@ settled paper bets.
 - Kalshi sync is read-only and only uses market status/result. It does not query
   live account positions.
 - Calibration metrics stay sparse until enough paper bets settle.
+- Closing-line metrics are only as current as the latest merged snapshot passed
+  to `ledger sync-lines` or produced by `cycle`.

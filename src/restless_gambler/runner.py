@@ -49,11 +49,7 @@ class RestlessGamblerRunner:
 
     def _run(self) -> RunArtifact:
         timestamp = f"{self.config.as_of.isoformat()}T00:00:00Z"
-        run_id = build_run_id(
-            self.config.mode,
-            self.config.strategy.name,
-            self.config.as_of,
-        )
+        run_id = run_id_for_config(self.config)
         loaded_markets = load_market_snapshots(
             path=self.config.data.markets_path,
             as_of=self.config.as_of,
@@ -294,6 +290,14 @@ def write_artifact(artifact: RunArtifact, output_dir: Path) -> Path:
 
 def build_run_id(mode: str, strategy_name: str, as_of: date) -> str:
     return f"{mode}-{strategy_name}-{as_of.strftime('%Y%m%d')}"
+
+
+def run_id_for_config(config: RestlessGamblerConfig) -> str:
+    return config.run_id or build_run_id(
+        config.mode,
+        config.strategy.name,
+        config.as_of,
+    )
 
 
 def _wager_key(venue: str, market_id: str, outcome_id: str) -> tuple[str, str, str]:

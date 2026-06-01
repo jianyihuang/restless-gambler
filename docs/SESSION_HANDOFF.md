@@ -15,6 +15,7 @@ Restless Gambler is a paper-first gambling research bot. It supports:
 - Read-only sportsbook moneyline, spread, and totals settlement sync from The
   Odds API scores.
 - `restless-gambler cycle` for the focused MLB paper workflow.
+- Latest/closing line tracking for open paper bets via merged snapshots.
 
 The project intentionally stays separate from `~/marketforge`; run the namespace
 doctor before large integration changes.
@@ -59,7 +60,9 @@ uv run restless-gambler cycle \
 
 The cycle command fetches Kalshi, fetches sportsbook odds, merges snapshots,
 runs persisted paper execution with snapshot venues allowed, syncs settlements,
-and prints a compact JSON state summary.
+syncs latest line snapshots, and prints a compact JSON state summary. Cycle run
+IDs include a UTC timestamp suffix, so repeated automation should not overwrite
+run-scoped rows.
 
 Manual equivalent:
 
@@ -110,6 +113,7 @@ uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
+uv run restless-gambler eval closing-lines
 ```
 
 Launch dashboard:
@@ -145,6 +149,13 @@ uv run restless-gambler ledger sync-sportsbook \
   --days-from 3
 ```
 
+Latest/closing line sync:
+
+```bash
+uv run restless-gambler ledger sync-lines \
+  --markets-path data/markets/merged_latest.json
+```
+
 ## Validation Before Pushing
 
 ```bash
@@ -152,12 +163,12 @@ uv run ruff check .
 uv run pytest
 ```
 
-Current expected baseline after the cycle/calibration work is `34 passed`.
+Current expected baseline after the cycle/line-tracking work is `35 passed`.
 
 ## Next Useful Work
 
 1. Add source-backed MLB stat signals beyond no-vig consensus.
-2. Add closing-line comparison and richer calibration charts.
+2. Add closing-line history charts and richer calibration views.
 3. Add historical backtest fixtures once enough settled paper bets exist.
 4. Add stricter live Kalshi reconciliation tables and cancellation/amend flows.
 5. Keep all new platform integrations behind product-specific adapters and risk

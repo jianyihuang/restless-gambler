@@ -241,6 +241,9 @@ def test_cli_cycle_runs_paper_workflow(tmp_path, capsys, monkeypatch):
 
     assert result == 0
     assert payload["cycle"]["sport"] == "baseball_mlb"
+    assert "-cycle-" in payload["run"]["import"]["run_id"]
     assert payload["run"]["import"]["counts"]["bets"] == 1
+    assert payload["line_sync"]["matched"] == 1
+    assert payload["closing_lines"]["overall"]["tracked_count"] == 1
     assert payload["settlement_sync"]["sportsbook"]["checked"] == 1
     assert Path(payload["snapshots"]["merged"]).exists()

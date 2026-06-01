@@ -62,7 +62,9 @@ uv run restless-gambler cycle \
 
 `cycle` fetches Kalshi markets, fetches sportsbook odds, merges snapshots, runs
 paper execution with real snapshot venues enabled, persists the run, syncs
-settlements, and prints a JSON summary.
+latest line snapshots, syncs settlements, and prints a JSON summary. Cycle runs
+use timestamped run IDs so repeated automation does not overwrite prior
+run-scoped rows.
 
 ## Real Kalshi Read-Only Data
 
@@ -112,6 +114,7 @@ uv run restless-gambler db status
 uv run restless-gambler ledger status
 uv run restless-gambler eval summary
 uv run restless-gambler eval calibration
+uv run restless-gambler eval closing-lines
 ```
 
 Launch the local dashboard:
@@ -162,6 +165,14 @@ scores:
 uv run restless-gambler ledger sync-sportsbook \
   --sport baseball_mlb \
   --days-from 3
+```
+
+Snapshot latest/closing odds for open paper bets from the current merged market
+file:
+
+```bash
+uv run restless-gambler ledger sync-lines \
+  --markets-path data/markets/merged_latest.json
 ```
 
 Check production Kalshi credentials without changing `.env`:
@@ -216,7 +227,7 @@ uv run restless-gambler data merge-snapshots \
 1. Add real external research adapters for market rules, official data, and news.
 2. Expand source-backed models beyond sportsbook consensus into weather,
    economic, and sport-stat signals.
-3. Add richer calibration charts and closing-line comparison.
+3. Add richer calibration charts and closing-line history views.
 4. Add sport-stat ingestion for the focused MLB paper cycle.
 5. Add venue-specific execution only where legal account access and platform
    APIs allow it.

@@ -74,6 +74,7 @@ class ArtifactConfig:
 class RestlessGamblerConfig:
     mode: RuntimeMode
     as_of: date
+    run_id: str | None = None
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
     model: ModelConfig = field(default_factory=ModelConfig)

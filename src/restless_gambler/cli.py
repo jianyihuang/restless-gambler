@@ -4,7 +4,8 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import date
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from restless_gambler.config import (
@@ -28,6 +29,7 @@ from restless_gambler.paths import DATA_DIR
 from restless_gambler.persistence import (
     DEFAULT_DB_PATH,
     calibration_summary,
+    closing_line_summary,
     evaluation_summary,
     import_run_artifact,
     init_database,
@@ -36,8 +38,13 @@ from restless_gambler.persistence import (
     open_ledger_wager_keys,
     settle_paper_bet,
     summarize_database,
+    sync_paper_bet_lines,
 )
-from restless_gambler.runner import RestlessGamblerRunner, build_run_id
+from restless_gambler.runner import (
+    RestlessGamblerRunner,
+    build_run_id,
+    run_id_for_config,
+)
 from restless_gambler.settlement import (
     settle_market_paper_bets,
     sync_kalshi_paper_settlements,
@@ -84,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         return ledger_sync_kalshi_command(args)
     if args.command == "ledger" and args.ledger_command == "sync-sportsbook":
         return ledger_sync_sportsbook_command(args)
+    if args.command == "ledger" and args.ledger_command == "sync-lines":
+        return ledger_sync_lines_command(args)
     if args.command == "live" and args.live_command == "preflight-kalshi":
         return live_preflight_kalshi_command(args)
     if args.command == "live" and args.live_command == "reconcile-kalshi":
@@ -92,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         return eval_summary_command(args)
     if args.command == "eval" and args.eval_command == "calibration":
         return eval_calibration_command(args)
+    if args.command == "eval" and args.eval_command == "closing-lines":
+        return eval_closing_lines_command(args)
     if args.command == "doctor" and args.doctor_command == "namespace":
         return doctor_namespace_command(args)
     if args.command == "credentials" and args.credentials_command == "check-kalshi":
@@ -596,6 +607,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DB_PATH,
         help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
     )
+    ledger_sync_lines_parser = ledger_subparsers.add_parser(
+        "sync-lines",
+        help="snapshot latest odds for open paper bets from a merged market file",
+    )
+    ledger_sync_lines_parser.add_argument(
+        "--markets-path",
+        type=Path,
+        default=DATA_DIR / "markets" / "merged_latest.json",
+        help="path to the latest normalized or merged market snapshot",
+    )
+    ledger_sync_lines_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10_000,
+        help="maximum open paper bets to check",
+    )
+    ledger_sync_lines_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
 
     eval_parser = subparsers.add_parser(
         "eval",
@@ -617,6 +650,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="summarize settled paper-bet calibration and EV bucket performance",
     )
     eval_calibration_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"DuckDB database path; default {DEFAULT_DB_PATH}",
+    )
+    eval_lines_parser = eval_subparsers.add_parser(
+        "closing-lines",
+        help="summarize latest/closing line movement for tracked paper bets",
+    )
+    eval_lines_parser.add_argument(
         "--db-path",
         type=Path,
         default=DEFAULT_DB_PATH,
@@ -718,7 +761,7 @@ def run_command(args) -> int:
         allowed_venues=allowed_venues,
         confirm_live=args.confirm_live,
     )
-    run_id = build_run_id(config.mode, config.strategy.name, config.as_of)
+    run_id = run_id_for_config(config)
     duplicate_guard_enabled = (
         args.persist or args.avoid_open_ledger
     ) and not args.allow_duplicate_open_ledger
@@ -774,6 +817,7 @@ def _snapshot_venues(path: Path) -> set[str]:
 
 def cycle_command(args) -> int:
     warnings: list[str] = []
+    cycle_started_at = datetime.now(UTC)
     try:
         kalshi_fetch = fetch_kalshi_market_data(
             max_markets=args.kalshi_limit,
@@ -812,7 +856,11 @@ def cycle_command(args) -> int:
             max_units_per_wager=args.max_units_per_wager,
             allowed_venues=allowed_venues,
         )
-        run_id = build_run_id(config.mode, config.strategy.name, config.as_of)
+        config = replace(
+            config,
+            run_id=_cycle_run_id(config, cycle_started_at),
+        )
+        run_id = run_id_for_config(config)
         duplicate_guard_enabled = not args.allow_duplicate_open_ledger
         blocked_wagers = (
             open_ledger_wager_keys(db_path=args.db_path, exclude_run_id=run_id)
@@ -836,6 +884,10 @@ def cycle_command(args) -> int:
         import_summary = import_run_artifact(
             artifact_path=artifact_path,
             db_path=args.db_path,
+        )
+        line_sync = sync_paper_bet_lines(
+            db_path=args.db_path,
+            markets_path=merged_path,
         )
     except (OSError, ValueError) as error:
         print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
@@ -888,13 +940,21 @@ def cycle_command(args) -> int:
             "import": import_summary.to_dict(),
         },
         "settlement_sync": settlement_sync,
+        "line_sync": line_sync.to_dict(),
         "db": summarize_database(args.db_path),
         "ledger": ledger_status(args.db_path),
         "calibration": calibration_summary(args.db_path),
+        "closing_lines": closing_line_summary(args.db_path),
         "warnings": warnings,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def _cycle_run_id(config, started_at: datetime) -> str:
+    base_run_id = build_run_id(config.mode, config.strategy.name, config.as_of)
+    suffix = started_at.strftime("cycle-%Y%m%dT%H%M%S%fZ")
+    return f"{base_run_id}-{suffix}"
 
 
 def dashboard_command(args) -> int:
@@ -1048,6 +1108,20 @@ def ledger_sync_sportsbook_command(args) -> int:
     return 0 if not summary.errors else 1
 
 
+def ledger_sync_lines_command(args) -> int:
+    try:
+        summary = sync_paper_bet_lines(
+            db_path=args.db_path,
+            markets_path=args.markets_path,
+            limit=args.limit,
+        )
+    except (OSError, ValueError) as error:
+        print(json.dumps({"error": str(error)}, indent=2, sort_keys=True))
+        return 1
+    print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
 def eval_summary_command(args) -> int:
     print(json.dumps(evaluation_summary(args.db_path), indent=2, sort_keys=True))
     return 0
@@ -1055,6 +1129,11 @@ def eval_summary_command(args) -> int:
 
 def eval_calibration_command(args) -> int:
     print(json.dumps(calibration_summary(args.db_path), indent=2, sort_keys=True))
+    return 0
+
+
+def eval_closing_lines_command(args) -> int:
+    print(json.dumps(closing_line_summary(args.db_path), indent=2, sort_keys=True))
     return 0
 
 

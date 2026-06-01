@@ -52,6 +52,19 @@ class SettlementResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class LineSyncSummary:
+    db_path: str
+    markets_path: str
+    checked_at: str
+    matched: int
+    missing: int
+    snapshots: list[dict[str, object]]
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 def init_database(db_path: Path = DEFAULT_DB_PATH) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with duckdb.connect(str(db_path)) as con:
@@ -122,6 +135,7 @@ def summarize_database(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
                 "executions",
                 "bets",
                 "paper_bet_ledger",
+                "paper_line_snapshots",
             )
         }
         latest_runs = [
@@ -535,6 +549,222 @@ def calibration_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
     }
 
 
+def sync_paper_bet_lines(
+    *,
+    markets_path: Path,
+    db_path: Path = DEFAULT_DB_PATH,
+    checked_at: str | None = None,
+    limit: int = 10_000,
+) -> LineSyncSummary:
+    if limit <= 0:
+        msg = "limit must be positive"
+        raise ValueError(msg)
+
+    checked = checked_at or _now()
+    quote_map, source_generated_at = _snapshot_quote_map(markets_path)
+    open_bets = open_paper_bets(db_path=db_path, limit=limit)
+    snapshots: list[dict[str, object]] = []
+    missing = 0
+
+    init_database(db_path)
+    with duckdb.connect(str(db_path)) as con:
+        _create_schema(con)
+        for bet in open_bets:
+            key = (
+                str(bet["venue"]),
+                str(bet["market_id"]),
+                str(bet["outcome_id"]),
+            )
+            quote = quote_map.get(key)
+            if quote is None:
+                missing += 1
+                continue
+
+            entry_price = float(bet["price"])
+            latest_price = float(quote["latest_price"])
+            price_format = str(quote["price_format"])
+            entry_implied_probability = _implied_probability(
+                entry_price,
+                str(bet["price_format"]),
+            )
+            latest_implied_probability = _implied_probability(
+                latest_price,
+                price_format,
+            )
+            implied_probability_delta = round(
+                latest_implied_probability - entry_implied_probability,
+                6,
+            )
+            row = {
+                "client_order_id": str(bet["client_order_id"]),
+                "checked_at": checked,
+                "source_path": str(markets_path),
+                "source_generated_at": source_generated_at,
+                "venue": str(bet["venue"]),
+                "product_type": str(bet["product_type"]),
+                "market_id": str(bet["market_id"]),
+                "outcome_id": str(bet["outcome_id"]),
+                "outcome_name": str(bet["outcome_name"]),
+                "entry_price": entry_price,
+                "latest_price": latest_price,
+                "price_format": price_format,
+                "entry_implied_probability": round(entry_implied_probability, 6),
+                "latest_implied_probability": round(latest_implied_probability, 6),
+                "implied_probability_delta": implied_probability_delta,
+                "market_status": str(quote["market_status"]),
+                "close_time": str(quote["close_time"]),
+            }
+            con.execute(
+                """
+                INSERT INTO paper_line_snapshots VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    row["client_order_id"],
+                    row["checked_at"],
+                    row["source_path"],
+                    row["source_generated_at"],
+                    row["venue"],
+                    row["product_type"],
+                    row["market_id"],
+                    row["outcome_id"],
+                    row["outcome_name"],
+                    row["entry_price"],
+                    row["latest_price"],
+                    row["price_format"],
+                    row["entry_implied_probability"],
+                    row["latest_implied_probability"],
+                    row["implied_probability_delta"],
+                    row["market_status"],
+                    row["close_time"],
+                ],
+            )
+            snapshots.append(row)
+
+    return LineSyncSummary(
+        db_path=str(db_path),
+        markets_path=str(markets_path),
+        checked_at=checked,
+        matched=len(snapshots),
+        missing=missing,
+        snapshots=snapshots,
+    )
+
+
+def closing_line_summary(db_path: Path = DEFAULT_DB_PATH) -> dict[str, object]:
+    init_database(db_path)
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        overall = con.execute(
+            """
+            WITH latest AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY client_order_id
+                         ORDER BY checked_at DESC
+                       ) AS rn
+                FROM paper_line_snapshots
+            )
+            SELECT COUNT(*) AS tracked_count,
+                   AVG(implied_probability_delta) AS average_delta,
+                   SUM(CASE WHEN implied_probability_delta > 0 THEN 1 ELSE 0 END)
+                     AS positive_count,
+                   SUM(CASE WHEN implied_probability_delta < 0 THEN 1 ELSE 0 END)
+                     AS negative_count,
+                   SUM(CASE WHEN implied_probability_delta = 0 THEN 1 ELSE 0 END)
+                     AS unchanged_count
+            FROM latest
+            WHERE rn = 1
+            """
+        ).fetchone()
+        by_venue_rows = con.execute(
+            """
+            WITH latest AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY client_order_id
+                         ORDER BY checked_at DESC
+                       ) AS rn
+                FROM paper_line_snapshots
+            )
+            SELECT venue, product_type,
+                   COUNT(*) AS tracked_count,
+                   AVG(implied_probability_delta) AS average_delta,
+                   SUM(CASE WHEN implied_probability_delta > 0 THEN 1 ELSE 0 END)
+                     AS positive_count,
+                   SUM(CASE WHEN implied_probability_delta < 0 THEN 1 ELSE 0 END)
+                     AS negative_count
+            FROM latest
+            WHERE rn = 1
+            GROUP BY venue, product_type
+            ORDER BY tracked_count DESC, average_delta DESC
+            """
+        ).fetchall()
+        latest_rows = con.execute(
+            """
+            WITH latest AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY client_order_id
+                         ORDER BY checked_at DESC
+                       ) AS rn
+                FROM paper_line_snapshots
+            )
+            SELECT client_order_id, checked_at, venue, product_type, market_id,
+                   outcome_id, outcome_name, entry_price, latest_price,
+                   price_format, entry_implied_probability,
+                   latest_implied_probability, implied_probability_delta,
+                   market_status, close_time
+            FROM latest
+            WHERE rn = 1
+            ORDER BY ABS(implied_probability_delta) DESC, checked_at DESC
+            LIMIT 100
+            """
+        ).fetchall()
+
+    return {
+        "db_path": str(db_path),
+        "overall": {
+            "tracked_count": int(overall[0] or 0),
+            "average_implied_probability_delta": _round_optional(overall[1], 6),
+            "positive_count": int(overall[2] or 0),
+            "negative_count": int(overall[3] or 0),
+            "unchanged_count": int(overall[4] or 0),
+        },
+        "by_venue": [
+            {
+                "venue": row[0],
+                "product_type": row[1],
+                "tracked_count": row[2],
+                "average_implied_probability_delta": _round_optional(row[3], 6),
+                "positive_count": int(row[4] or 0),
+                "negative_count": int(row[5] or 0),
+            }
+            for row in by_venue_rows
+        ],
+        "latest": [
+            {
+                "client_order_id": row[0],
+                "checked_at": row[1],
+                "venue": row[2],
+                "product_type": row[3],
+                "market_id": row[4],
+                "outcome_id": row[5],
+                "outcome_name": row[6],
+                "entry_price": row[7],
+                "latest_price": row[8],
+                "price_format": row[9],
+                "entry_implied_probability": row[10],
+                "latest_implied_probability": row[11],
+                "implied_probability_delta": row[12],
+                "market_status": row[13],
+                "close_time": row[14],
+            }
+            for row in latest_rows
+        ],
+    }
+
+
 def settle_paper_bet(
     *,
     client_order_id: str,
@@ -849,6 +1079,29 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             payout DOUBLE,
             realized_pnl DOUBLE,
             settled_at TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_line_snapshots (
+            client_order_id TEXT,
+            checked_at TEXT,
+            source_path TEXT,
+            source_generated_at TEXT,
+            venue TEXT,
+            product_type TEXT,
+            market_id TEXT,
+            outcome_id TEXT,
+            outcome_name TEXT,
+            entry_price DOUBLE,
+            latest_price DOUBLE,
+            price_format TEXT,
+            entry_implied_probability DOUBLE,
+            latest_implied_probability DOUBLE,
+            implied_probability_delta DOUBLE,
+            market_status TEXT,
+            close_time TEXT
         )
         """
     )
@@ -1304,6 +1557,25 @@ def _decimal_odds(price: float, price_format: str) -> float:
     return 1.0 + (100.0 / abs(price))
 
 
+def _implied_probability(price: float, price_format: str) -> float:
+    if price_format == "probability":
+        if not 0.0 <= price <= 1.0:
+            msg = f"invalid probability price: {price}"
+            raise ValueError(msg)
+        return price
+    if price_format == "decimal":
+        if price <= 1.0:
+            msg = f"invalid decimal price: {price}"
+            raise ValueError(msg)
+        return 1.0 / price
+    if price == 0:
+        msg = "american price cannot be zero"
+        raise ValueError(msg)
+    if price > 0:
+        return 100.0 / (price + 100.0)
+    return abs(price) / (abs(price) + 100.0)
+
+
 def _hit_rate(*, won_count: int, lost_count: int) -> float | None:
     graded_count = won_count + lost_count
     if graded_count == 0:
@@ -1336,6 +1608,55 @@ def _loads_json_object(value: object) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _snapshot_quote_map(
+    markets_path: Path,
+) -> tuple[dict[tuple[str, str, str], dict[str, object]], str]:
+    payload = json.loads(markets_path.read_text(encoding="utf-8"))
+    generated_at = str(payload.get("generated_at", ""))
+    quote_map: dict[tuple[str, str, str], dict[str, object]] = {}
+    markets = payload.get("markets", [])
+    if not isinstance(markets, list):
+        return quote_map, generated_at
+
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        venue = str(market.get("venue") or "")
+        market_id = str(market.get("market_id") or "")
+        if not venue or not market_id:
+            continue
+        for outcome in _list_dicts(market.get("outcomes")):
+            outcome_id = str(outcome.get("outcome_id") or "")
+            price_format = str(outcome.get("price_format") or "")
+            if not outcome_id or not price_format:
+                continue
+            latest_price = _latest_line_price(outcome)
+            if latest_price is None:
+                continue
+            quote_map[(venue, market_id, outcome_id)] = {
+                "latest_price": latest_price,
+                "price_format": price_format,
+                "market_status": str(market.get("status") or ""),
+                "close_time": str(market.get("close_time") or ""),
+            }
+    return quote_map, generated_at
+
+
+def _latest_line_price(outcome: dict[str, object]) -> float | None:
+    raw_price = outcome.get("ask")
+    if raw_price is None:
+        raw_price = outcome.get("price")
+    if raw_price is None:
+        return None
+    return float(raw_price)
+
+
+def _list_dicts(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _now() -> str:

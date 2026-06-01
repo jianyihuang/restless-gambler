@@ -11,6 +11,7 @@ import streamlit as st
 from restless_gambler.persistence import (
     DEFAULT_DB_PATH,
     calibration_summary,
+    closing_line_summary,
     evaluation_summary,
     init_database,
     ledger_status,
@@ -57,7 +58,7 @@ def main() -> None:
     with bets_tab:
         render_bets(data["bets"])
     with calibration_tab:
-        render_calibration(data["calibration"])
+        render_calibration(data)
     with activity_tab:
         render_activity(data)
     with runs_tab:
@@ -77,6 +78,7 @@ def load_dashboard_data(db_path_value: str) -> dict[str, Any]:
         "ledger": ledger_status(db_path),
         "evaluation": evaluation_summary(db_path),
         "calibration": calibration_summary(db_path),
+        "closing_lines": closing_line_summary(db_path),
         "exposure": open_ledger_exposure(db_path=db_path),
         "latest_run": _query(db_path, LATEST_RUN_SQL),
         "runs": _query(db_path, RUNS_SQL),
@@ -189,13 +191,21 @@ def render_cycle(data: dict[str, Any]) -> None:
     st.dataframe(data["ledger"]["open_bets"], use_container_width=True, hide_index=True)
 
 
-def render_calibration(calibration: dict[str, Any]) -> None:
+def render_calibration(data: dict[str, Any]) -> None:
+    calibration = data["calibration"]
+    closing_lines = data["closing_lines"]
     overall = calibration["overall"]
-    col1, col2, col3, col4 = st.columns(4)
+    line_overall = closing_lines["overall"]
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Settled", overall["settled_count"])
     col2.metric("Graded", overall["graded_count"])
     col3.metric("Hit Rate", _percent(overall["hit_rate"]))
     col4.metric("Brier", _number(overall["brier_score"]))
+    col5.metric("Tracked Lines", line_overall["tracked_count"])
+    col6.metric(
+        "Avg CLV",
+        _signed_number(line_overall["average_implied_probability_delta"]),
+    )
 
     st.subheader("By Venue")
     st.dataframe(calibration["by_venue"], use_container_width=True, hide_index=True)
@@ -205,6 +215,10 @@ def render_calibration(calibration: dict[str, Any]) -> None:
         use_container_width=True,
         hide_index=True,
     )
+    st.subheader("Closing-Line Movement By Venue")
+    st.dataframe(closing_lines["by_venue"], use_container_width=True, hide_index=True)
+    st.subheader("Latest Line Snapshots")
+    st.dataframe(closing_lines["latest"], use_container_width=True, hide_index=True)
 
 
 def render_activity(data: dict[str, Any]) -> None:
@@ -266,6 +280,12 @@ def _number(value: object) -> str:
     if value is None:
         return "-"
     return f"{float(value):.4f}"
+
+
+def _signed_number(value: object) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):+.4f}"
 
 
 LATEST_RUN_SQL = """
